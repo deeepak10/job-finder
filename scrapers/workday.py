@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 import aiohttp
 
 logger = logging.getLogger(__name__)
@@ -72,12 +73,20 @@ async def scrape_workday_async() -> list[dict[str, Any]]:
                                 job_info = detail_data.get("jobPostingInfo", {})
                                 description = job_info.get("jobDescription", description)
 
+                        # Construct valid public-facing candidate URL
+                        parsed_base = urlsplit(company["url"])
+                        base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
+                        if external_path:
+                            public_url = f"{base_domain}/en-US/External{external_path}"
+                        else:
+                            public_url = base_domain
+
                         # Step 3: Match the exact Turso database schema
                         jobs_collected.append({
                             "title": item.get("title", ""),
                             "company": company["name"],
                             "location": item.get("locationsText", "Not specified"),
-                            "url": company["url"].replace("/wday/cxs", "") + external_path,
+                            "url": public_url,
                             "description": description,
                             "source": "Workday ATS",
                             "tier": "strict",

@@ -694,7 +694,7 @@ def test_workday_scraper_success(monkeypatch):
     assert len(jobs) == 2
     assert jobs[0]["title"] == "Principal Firmware Engineer"
     assert jobs[0]["company"] == "Medtronic"
-    assert "medtronic.wd1.myworkdayjobs.com/medtronic/MedtronicCareers/job/" in jobs[0]["url"]
+    assert "medtronic.wd1.myworkdayjobs.com/en-US/External/job/" in jobs[0]["url"]
     assert jobs[0]["location"] == "Minneapolis, MN, United States"
     assert jobs[0]["description"] == "<p>Design firmware for implantable medical devices.</p>"
     assert jobs[0]["source"] == "Workday ATS"

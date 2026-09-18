@@ -22,26 +22,43 @@ log = logging.getLogger(__name__)
 # Layer 1: Regex Spam Filter
 # --------------------------------------------------------------------------
 
+SPAM_KEYWORDS: list[str] = [
+    "sales", "bde", "business development", "marketing", "representative",
+    "field service", "maintenance", "repair technician", "service engineer",
+    "billing", "pharmacist", "receptionist", "clerk", "bpo", "helpdesk",
+    "customer support", "voice process", "telecaller",
+]
+
 SPAM_PATTERNS: dict[str, list[re.Pattern]] = {
     "Medical/Clerical": [
         re.compile(r"\bmedical\s+coding\b", re.IGNORECASE),
         re.compile(r"\bmedical\s+billing\b", re.IGNORECASE),
+        re.compile(r"\bbilling\b", re.IGNORECASE),
         re.compile(r"\bpharmacist\b", re.IGNORECASE),
         re.compile(r"\bhospital\s+operations\b", re.IGNORECASE),
-    ],
-    "Sales/BDE": [
-        re.compile(r"\bsales\s+(?:executive|manager|representative)\b", re.IGNORECASE),
-        re.compile(r"\bbde\b", re.IGNORECASE),
-        re.compile(r"\bbusiness\s+development\b", re.IGNORECASE),
-        re.compile(r"\bretail\s+(?:manager|associate|sales)\b", re.IGNORECASE),
+        re.compile(r"\breceptionist\b", re.IGNORECASE),
+        re.compile(r"\bclerk\b", re.IGNORECASE),
     ],
     "Customer Support": [
         re.compile(r"\bcustomer\s+(?:service|support|success|care)\b", re.IGNORECASE),
+        re.compile(r"\bbpo\b", re.IGNORECASE),
+        re.compile(r"\bhelpdesk\b", re.IGNORECASE),
+        re.compile(r"\bvoice\s+process\b", re.IGNORECASE),
+        re.compile(r"\btelecaller\b", re.IGNORECASE),
+    ],
+    "Sales/BDE": [
+        re.compile(r"\bsales\b", re.IGNORECASE),
+        re.compile(r"\bbde\b", re.IGNORECASE),
+        re.compile(r"\bbusiness\s+development\b", re.IGNORECASE),
+        re.compile(r"\bmarketing\b", re.IGNORECASE),
+        re.compile(r"\brepresentative\b", re.IGNORECASE),
+        re.compile(r"\bretail\s+(?:manager|associate|sales)\b", re.IGNORECASE),
     ],
     "Field/Maintenance": [
         re.compile(r"\bservice\s+(?:engineer|technician)\b", re.IGNORECASE),
         re.compile(r"\bfield\s+service\b", re.IGNORECASE),
-        re.compile(r"\bmaintenance\s+(?:engineer|technician)\b", re.IGNORECASE),
+        re.compile(r"\bmaintenance\b", re.IGNORECASE),
+        re.compile(r"\brepair\s+technician\b", re.IGNORECASE),
         re.compile(r"\bamc\b", re.IGNORECASE),
     ],
     "Hardware": [

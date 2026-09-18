@@ -414,6 +414,40 @@ async def get_deferred_jobs(
             await client.session.close()
 
 
+async def get_pending_groq_jobs(
+    limit: int = 50,
+    client: Optional[AsyncTursoConnection] = None,
+) -> list[dict[str, Any]]:
+    """Retrieve jobs pending Groq verification from Turso Cloud SQLite.
+
+    Used when Groq was offline during the broad candidate gatekeeper phase,
+    and OpenRouter temporarily accepted the role. These jobs require secondary
+    Groq verification before alerting to eliminate false positives.
+
+    Args:
+        limit: Maximum number of pending jobs to fetch.
+        client: Optional shared AsyncTursoConnection instance.
+
+    Returns:
+        List of dictionaries containing pending Groq verification job records.
+    """
+    sql = "SELECT * FROM job_postings WHERE status = 'pending_groq_verification' ORDER BY date_found ASC LIMIT ?"
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        res = await client.execute_query(sql, [limit])
+        return parse_turso_rows(res)
+    except Exception as exc:
+        log.warning("Failed to query pending_groq_verification jobs from Turso: %s", exc)
+        return []
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
 async def update_job_status(
     job_id: str,
     status: str,

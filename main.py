@@ -40,6 +40,7 @@ import config
 from database import (
     add_job,
     get_deferred_jobs,
+    get_pending_groq_jobs,
     get_stats,
     init_db,
     is_job_seen,
@@ -200,6 +201,10 @@ class PipelineMetrics:
         self.high_matches: int = 0
         self.alerts_sent: int = 0
         self.deferred_added: int = 0
+        self.pending_groq_swept: int = 0
+        self.pending_groq_verified: int = 0
+        self.pending_groq_conflicted: int = 0
+        self.pending_groq_added: int = 0
         self.rejected: int = 0
         self.strict_evaluated: int = 0
         self.broad_gatekept: int = 0
@@ -525,23 +530,36 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     is_morning_run = current_hour_utc <= 4
     sweep_deferred = is_morning_run or getattr(args, "re_eval_deferred", False)
     deferred_jobs_to_sweep: list[dict[str, Any]] = []
+    pending_groq_to_sweep: list[dict[str, Any]] = []
 
-    if sweep_deferred and not args.dry_run and config.TURSO_DATABASE_URL and config.TURSO_AUTH_TOKEN:
+    if not args.dry_run and config.TURSO_DATABASE_URL and config.TURSO_AUTH_TOKEN:
+        if sweep_deferred:
+            try:
+                pending_deferred = await get_deferred_jobs(limit=50)
+                if pending_deferred:
+                    log.info(
+                        "Morning run/flag detected: Swept %d deferred job(s) from Turso queue for Gemini executive tie-breaking.",
+                        len(pending_deferred),
+                    )
+                    print(f"[{_ts()}] [Executive Tie-Breaker] Swept {len(pending_deferred)} deferred job(s) for Gemini re-evaluation.")
+                    metrics.deferred_swept = len(pending_deferred)
+                    deferred_jobs_to_sweep = pending_deferred
+            except Exception as exc:
+                log.warning("Could not sweep deferred jobs from Turso: %s", exc)
+
+        # Check for broad jobs pending Groq confirmation (Fallback Ambiguity Rule)
         try:
-            pending_deferred = await get_deferred_jobs(limit=50)
-            if pending_deferred:
-                log.info(
-                    "Morning run/flag detected: Swept %d deferred job(s) from Turso queue for Gemini executive tie-breaking.",
-                    len(pending_deferred),
-                )
-                print(f"[{_ts()}] [Executive Tie-Breaker] Swept {len(pending_deferred)} deferred job(s) for Gemini re-evaluation.")
-                metrics.deferred_swept = len(pending_deferred)
-                deferred_jobs_to_sweep = pending_deferred
+            pending_groq = await get_pending_groq_jobs(limit=50)
+            if pending_groq:
+                log.info("Swept %d broad job(s) pending Groq verification from Turso queue.", len(pending_groq))
+                print(f"[{_ts()}] [Groq Verification Sweep] Swept {len(pending_groq)} job(s) pending Groq confirmation.")
+                metrics.pending_groq_swept = len(pending_groq)
+                pending_groq_to_sweep = pending_groq
         except Exception as exc:
-            log.warning("Could not sweep deferred jobs from Turso: %s", exc)
+            log.warning("Could not sweep pending_groq_verification jobs from Turso: %s", exc)
 
-    if not candidate_jobs and not deferred_jobs_to_sweep:
-        log.info("No fresh candidate or deferred jobs to evaluate. Exiting pipeline.")
+    if not candidate_jobs and not deferred_jobs_to_sweep and not pending_groq_to_sweep:
+        log.info("No fresh candidate, deferred, or pending verification jobs to evaluate. Exiting pipeline.")
         return
 
     # =========================================================================
@@ -552,14 +570,14 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     if not getattr(config, "GROQ_API_KEY", None) and not getattr(config, "OPENROUTER_API_KEY", None):
         candidate_jobs = candidate_jobs[:6]
 
-    print(f"\n[{_ts()}] >>> [Tri-Model Evaluation Phase] START | Evaluating {len(candidate_jobs)} fresh jobs, {len(deferred_jobs_to_sweep)} deferred")
+    print(f"\n[{_ts()}] >>> [Tri-Model Evaluation Phase] START | Evaluating {len(candidate_jobs)} fresh jobs, {len(deferred_jobs_to_sweep)} deferred, {len(pending_groq_to_sweep)} pending Groq")
 
     semaphore = asyncio.Semaphore(1)
     gemini_quota_exhausted = False
 
     async with aiohttp.ClientSession() as session:
         # ---------------------------------------------------------------------
-        # Phase 3A: Deferred Queue Gemini Executive Tie-Breaker
+        # Phase 3A.1: Deferred Queue Gemini Executive Tie-Breaker
         # ---------------------------------------------------------------------
         if deferred_jobs_to_sweep:
             print(f"[{_ts()}] >>> [Executive Tie-Breaker] Evaluating {len(deferred_jobs_to_sweep)} deferred conflicts exclusively with Gemini")
@@ -609,6 +627,76 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                     break
                 except Exception as exc:
                     log.error("Error during executive tie-break for '%s': %s", d_payload["title"], exc)
+
+        # ---------------------------------------------------------------------
+        # Phase 3A.2: Pending Groq Verification Sweep (Broad Ambiguity Rule)
+        # ---------------------------------------------------------------------
+        if pending_groq_to_sweep:
+            print(f"[{_ts()}] >>> [Groq Verification Sweep] Verifying {len(pending_groq_to_sweep)} broad role(s) with Groq")
+            groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
+            for p_idx, p_job in enumerate(pending_groq_to_sweep, 1):
+                p_payload = {
+                    "title": p_job.get("title", ""),
+                    "company": p_job.get("company", ""),
+                    "location": p_job.get("location", ""),
+                    "platform": p_job.get("platform", "broad"),
+                    "description": p_job.get("description", ""),
+                    "url": p_job.get("url", ""),
+                }
+                p_id = p_job.get("job_id") or title_company_hash(p_payload["title"], p_payload["company"])
+                p_prompt = build_job_prompt(p_payload)
+                log.info("Groq Verification %d/%d: '%s' @ %s", p_idx, len(pending_groq_to_sweep), p_payload["title"], p_payload["company"])
+                try:
+                    groq_res = await query_model(groq_client, groq_model, p_prompt)
+                    if groq_res is not None:
+                        if groq_res.get("is_match") is True:
+                            # Consensus reached! Both OpenRouter and Groq accept.
+                            score = groq_res.get("ai_score") or 75
+                            await update_job_status(
+                                job_id=p_id,
+                                status="active",
+                                ai_score=score,
+                                visa_sponsorship=groq_res.get("visa_sponsorship"),
+                            )
+                            eval_obj = JobEvaluation(
+                                is_match=True,
+                                visa_sponsorship=groq_res.get("visa_sponsorship") or "Not Specified",
+                                ai_score=score,
+                                status="active",
+                            )
+                            alert_sent = False
+                            if score >= 70:
+                                alert_sent = await send_discord_alert_async(p_payload, eval_obj, session=session)
+                                if alert_sent:
+                                    await mark_alert_sent(p_id)
+                            await metrics.inc_evaluated(
+                                is_high_match=(score >= 70),
+                                alerted=alert_sent,
+                                is_broad=True,
+                            )
+                            metrics.pending_groq_verified += 1
+                            log.info("Pending Groq Verification PASSED for '%s' @ %s. Alert dispatched.", p_payload["title"], p_payload["company"])
+                        else:
+                            # Conflict reached: OpenRouter accepted previously, but Groq rejected.
+                            # Park for next-day Gemini sweep
+                            await update_job_status(
+                                job_id=p_id,
+                                status="deferred",
+                                ai_score=0,
+                                visa_sponsorship="Conflict",
+                            )
+                            await metrics.inc_evaluated(
+                                is_high_match=False,
+                                alerted=False,
+                                is_deferred=True,
+                                is_broad=True,
+                            )
+                            metrics.pending_groq_conflicted += 1
+                            log.info("Pending Groq Verification CONFLICT for '%s' @ %s. Parked for Gemini sweep.", p_payload["title"], p_payload["company"])
+                    else:
+                        log.warning("Groq gatekeeper still unavailable for '%s'. Retaining pending_groq_verification status.", p_payload["title"])
+                except Exception as p_exc:
+                    log.error("Error during Groq verification for '%s': %s", p_payload["title"], p_exc)
 
         # ---------------------------------------------------------------------
         # Phase 3B: Fresh Candidate Jobs Tri-Model Routing
@@ -752,112 +840,201 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
 
             else:
                 # =============================================================
-                # ROUTE B: Broad Net (Groq Gatekeeper)
+                # ROUTE B: Broad Net (Groq Gatekeeper & Fallback Ambiguity Rule)
                 # =============================================================
                 log.info(
                     "Evaluating candidate job %d/%d [Route B - Broad]: '%s' @ %s (Groq Gatekeeper)",
                     eval_index, total_candidates, job.title, job.company,
                 )
                 groq_res = None
+                groq_online = False
                 groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
                 try:
                     groq_res = await query_model(groq_client, groq_model, prompt)
+                    if groq_res is not None:
+                        groq_online = True
                 except Exception as exc:
-                    log.warning("Groq gatekeeper exception: %s. Falling back to OpenRouter.", exc)
-                    try:
-                        groq_res = await query_model(openrouter_client, getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat"), prompt)
-                    except Exception as or_exc:
-                        log.error("Gatekeeper fallback also failed: %s", or_exc)
-                        groq_res = None
+                    log.warning("Groq gatekeeper exception: %s. Entering Fallback Ambiguity mode.", exc)
+                    groq_online = False
+                    groq_res = None
 
-                if not groq_res or groq_res.get("is_match") is False:
-                    # Groq (or fallback) REJECTS -> Gatekeeper saved Gemini quota!
-                    log.info("Route B: Gatekeeper rejected '%s' @ %s. Saved Gemini quota.", job.title, job.company)
-                    rec = {
-                        "job_id": job_id,
-                        "title": job.title,
-                        "company": job.company,
-                        "location": job.location,
-                        "platform": job.platform,
-                        "url": job.url,
-                        "description": job.description,
-                        "ai_score": (groq_res.get("ai_score") if groq_res else 0) or 0,
-                        "visa_sponsorship": (groq_res.get("visa_sponsorship") if groq_res else "Rejected") or "Rejected",
-                        "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                        "alert_sent": 0,
-                        "status": "rejected",
-                        "tier": "broad",
-                    }
-                    if not args.dry_run:
-                        await add_job(rec)
-                    await metrics.inc_evaluated(is_high_match=False, alerted=False, is_rejected=True, is_broad=True)
-                    continue
+                if groq_online and groq_res is not None:
+                    # ---------------------------------------------------------
+                    # 1 & 2: Groq is ONLINE
+                    # ---------------------------------------------------------
+                    if groq_res.get("is_match") is False:
+                        # Groq rejects -> status = 'rejected', persist to Turso
+                        log.info("Route B: Groq gatekeeper rejected '%s' @ %s. Saved Gemini quota.", job.title, job.company)
+                        rec = {
+                            "job_id": job_id,
+                            "title": job.title,
+                            "company": job.company,
+                            "location": job.location,
+                            "platform": job.platform,
+                            "url": job.url,
+                            "description": job.description,
+                            "ai_score": groq_res.get("ai_score") or 0,
+                            "visa_sponsorship": groq_res.get("visa_sponsorship") or "Rejected",
+                            "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "alert_sent": 0,
+                            "status": "rejected",
+                            "tier": "broad",
+                        }
+                        if not args.dry_run:
+                            await add_job(rec)
+                        await metrics.inc_evaluated(is_high_match=False, alerted=False, is_rejected=True, is_broad=True)
+                        continue
 
-                # Groq ACCEPTS -> Verify with OpenRouter
-                log.info("Route B: Gatekeeper accepted '%s' @ %s. Verifying with OpenRouter...", job.title, job.company)
-                or_model = getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat")
-                or_res = None
-                try:
-                    or_res = await query_model(openrouter_client, or_model, prompt)
-                except Exception as or_exc:
-                    log.warning("OpenRouter verification failed: %s", or_exc)
+                    # Groq accepts -> Query OpenRouter verification
+                    log.info("Route B: Groq gatekeeper accepted '%s' @ %s. Verifying with OpenRouter...", job.title, job.company)
+                    or_model = getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat")
                     or_res = None
+                    try:
+                        or_res = await query_model(openrouter_client, or_model, prompt)
+                    except Exception as or_exc:
+                        log.warning("OpenRouter verification exception: %s", or_exc)
+                        or_res = None
 
-                if or_res and or_res.get("is_match") is True:
-                    # Both Pass -> Active
-                    avg_score = int(((groq_res.get("ai_score") or 75) + (or_res.get("ai_score") or 75)) / 2)
-                    log.info("Route B: Both models approved '%s' @ %s (Score: %d)", job.title, job.company, avg_score)
-                    eval_obj = JobEvaluation(
-                        is_match=True,
-                        visa_sponsorship=groq_res.get("visa_sponsorship") or or_res.get("visa_sponsorship") or "Not Specified",
-                        ai_score=avg_score,
-                        status="consensus_passed",
-                    )
-                    rec = {
-                        "job_id": job_id,
-                        "title": job.title,
-                        "company": job.company,
-                        "location": job.location,
-                        "platform": job.platform,
-                        "url": job.url,
-                        "description": job.description,
-                        "ai_score": avg_score,
-                        "visa_sponsorship": eval_obj.visa_sponsorship,
-                        "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                        "alert_sent": 0,
-                        "status": "consensus_passed",
-                        "tier": "broad",
-                    }
-                    alert_delivered = False
-                    if not args.dry_run:
-                        await add_job(rec)
-                        if avg_score >= 70:
-                            alert_delivered = await send_discord_alert_async(job_payload, eval_obj, session=session)
-                            if alert_delivered:
-                                await mark_alert_sent(job_id)
-                    await metrics.inc_evaluated(is_high_match=(avg_score >= 70), alerted=alert_delivered, is_broad=True)
+                    if or_res and or_res.get("is_match") is True:
+                        # Both accept -> Consensus met. status = 'active', send Discord alert
+                        avg_score = int(((groq_res.get("ai_score") or 75) + (or_res.get("ai_score") or 75)) / 2)
+                        log.info("Route B: Both models approved '%s' @ %s (Score: %d)", job.title, job.company, avg_score)
+                        eval_obj = JobEvaluation(
+                            is_match=True,
+                            visa_sponsorship=groq_res.get("visa_sponsorship") or or_res.get("visa_sponsorship") or "Not Specified",
+                            ai_score=avg_score,
+                            status="active",
+                        )
+                        rec = {
+                            "job_id": job_id,
+                            "title": job.title,
+                            "company": job.company,
+                            "location": job.location,
+                            "platform": job.platform,
+                            "url": job.url,
+                            "description": job.description,
+                            "ai_score": avg_score,
+                            "visa_sponsorship": eval_obj.visa_sponsorship,
+                            "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "alert_sent": 0,
+                            "status": "active",
+                            "tier": "broad",
+                        }
+                        alert_delivered = False
+                        if not args.dry_run:
+                            await add_job(rec)
+                            if avg_score >= 70:
+                                alert_delivered = await send_discord_alert_async(job_payload, eval_obj, session=session)
+                                if alert_delivered:
+                                    await mark_alert_sent(job_id)
+                        await metrics.inc_evaluated(is_high_match=(avg_score >= 70), alerted=alert_delivered, is_broad=True)
+
+                    else:
+                        # OpenRouter rejects -> Conflict met. status = 'deferred', persist for Gemini tie-breaker
+                        log.info("Route B Split Decision for '%s' @ %s (Groq=True, OR=%s). Deferring to Gemini tie-breaker.",
+                                 job.title, job.company, bool(or_res.get("is_match")) if or_res else None)
+                        rec = {
+                            "job_id": job_id,
+                            "title": job.title,
+                            "company": job.company,
+                            "location": job.location,
+                            "platform": job.platform,
+                            "url": job.url,
+                            "description": job.description,
+                            "ai_score": groq_res.get("ai_score") or 0,
+                            "visa_sponsorship": groq_res.get("visa_sponsorship") or "Conflict",
+                            "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "alert_sent": 0,
+                            "status": "deferred",
+                            "tier": "broad",
+                        }
+                        if not args.dry_run:
+                            await add_job(rec)
+                        await metrics.inc_evaluated(is_high_match=False, alerted=False, is_deferred=True, is_broad=True)
+
                 else:
-                    # Groq YES, OpenRouter NO (or failed) -> Defer to Gemini tie-breaker
-                    log.info("Route B Split Decision for '%s' @ %s (Groq=True, OR=%s). Deferring to Gemini tie-breaker.",
-                             job.title, job.company, bool(or_res.get("is_match")) if or_res else None)
-                    rec = {
-                        "job_id": job_id,
-                        "title": job.title,
-                        "company": job.company,
-                        "location": job.location,
-                        "platform": job.platform,
-                        "url": job.url,
-                        "description": job.description,
-                        "ai_score": groq_res.get("ai_score") or 0,
-                        "visa_sponsorship": groq_res.get("visa_sponsorship") or "Conflict",
-                        "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                        "alert_sent": 0,
-                        "status": "deferred",
-                        "tier": "broad",
-                    }
-                    if not args.dry_run:
-                        await add_job(rec)
-                    await metrics.inc_evaluated(is_high_match=False, alerted=False, is_deferred=True, is_broad=True)
+                    # ---------------------------------------------------------
+                    # 3: Groq encounters API error -> Fallback Ambiguity Rule
+                    # ---------------------------------------------------------
+                    log.warning("Route B: Groq offline. Fallback to OpenRouter as solo gatekeeper for '%s' @ %s", job.title, job.company)
+                    or_model = getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat")
+                    or_res = None
+                    try:
+                        or_res = await query_model(openrouter_client, or_model, prompt)
+                    except Exception as or_exc:
+                        log.error("Solo OpenRouter gatekeeper failed: %s", or_exc)
+                        or_res = None
+
+                    if or_res and or_res.get("is_match") is False:
+                        # OpenRouter rejects -> status = 'rejected', persist to Turso
+                        log.info("Route B Solo Gatekeeper: OpenRouter rejected '%s' @ %s.", job.title, job.company)
+                        rec = {
+                            "job_id": job_id,
+                            "title": job.title,
+                            "company": job.company,
+                            "location": job.location,
+                            "platform": job.platform,
+                            "url": job.url,
+                            "description": job.description,
+                            "ai_score": or_res.get("ai_score") or 0,
+                            "visa_sponsorship": or_res.get("visa_sponsorship") or "Rejected",
+                            "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "alert_sent": 0,
+                            "status": "rejected",
+                            "tier": "broad",
+                        }
+                        if not args.dry_run:
+                            await add_job(rec)
+                        await metrics.inc_evaluated(is_high_match=False, alerted=False, is_rejected=True, is_broad=True)
+
+                    elif or_res and or_res.get("is_match") is True:
+                        # OpenRouter accepts -> DO NOT ALERT. Single junior model cannot approve broad roles.
+                        # status = 'pending_groq_verification', persist to Turso
+                        log.info(
+                            "Route B Fallback Ambiguity: OpenRouter accepted '%s' @ %s. Parked as 'pending_groq_verification'.",
+                            job.title, job.company,
+                        )
+                        rec = {
+                            "job_id": job_id,
+                            "title": job.title,
+                            "company": job.company,
+                            "location": job.location,
+                            "platform": job.platform,
+                            "url": job.url,
+                            "description": job.description,
+                            "ai_score": or_res.get("ai_score") or 70,
+                            "visa_sponsorship": or_res.get("visa_sponsorship") or "Pending Verification",
+                            "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "alert_sent": 0,
+                            "status": "pending_groq_verification",
+                            "tier": "broad",
+                        }
+                        if not args.dry_run:
+                            await add_job(rec)
+                        metrics.pending_groq_added += 1
+                        await metrics.inc_evaluated(is_high_match=False, alerted=False, is_broad=True)
+
+                    else:
+                        # Both models failed or error occurred -> Defer for Gemini executive tie-breaker
+                        log.warning("Route B: Both Groq and OpenRouter failed for '%s' @ %s. Deferring.", job.title, job.company)
+                        rec = {
+                            "job_id": job_id,
+                            "title": job.title,
+                            "company": job.company,
+                            "location": job.location,
+                            "platform": job.platform,
+                            "url": job.url,
+                            "description": job.description,
+                            "ai_score": 0,
+                            "visa_sponsorship": "Error",
+                            "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "alert_sent": 0,
+                            "status": "deferred",
+                            "tier": "broad",
+                        }
+                        if not args.dry_run:
+                            await add_job(rec)
+                        await metrics.inc_evaluated(is_high_match=False, alerted=False, is_deferred=True, is_broad=True)
 
     t_eval_elapsed = time.perf_counter() - t_eval_start
     log.info("========== [Tri-Model Evaluation Phase] END (%s) | Duration: %.2fs | Evaluated: %d jobs ==========",
@@ -872,6 +1049,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     print("=" * 60)
     print(f" * Total Postings Collected : {metrics.scraped}")
     print(f" * Deferred Swept (Morning) : {metrics.deferred_swept}")
+    print(f" * Pending Groq Swept       : {metrics.pending_groq_swept}")
     print(f" * Layer 0 Skipped (Seen)   : {metrics.seen_skipped}")
     print(f" * Layer 1 Discarded (Spam) : {metrics.spam_discarded}")
     print(f" * Layer 4 Evaluated (AI)   : {metrics.evaluated}")
@@ -881,6 +1059,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     print(f" * High Matches (>= 70)     : {metrics.high_matches}")
     print(f" * Discord Alerts Sent      : {metrics.alerts_sent}")
     print(f" * Jobs Deferred To Queue   : {metrics.deferred_added}")
+    print(f" * Pending Groq Added       : {metrics.pending_groq_added}")
     print(f" * Execution Duration       : {total_elapsed:.2f}s")
     print("=" * 60 + "\n")
 

@@ -23,16 +23,14 @@ def test_job_evaluation_schema_validation():
 
 
 def test_system_prompt_contains_required_sections():
-    assert "Diploma in Biomedical Engineering" in SYSTEM_INSTRUCTION
-    assert "B.Tech in Electronics and Communication Engineering (ECE)" in SYSTEM_INSTRUCTION
-    assert "Real-time ECG telemetry dashboard (Next.js/WebSockets)" in SYSTEM_INSTRUCTION
-    assert "Gesture recognition interface (OpenCV/MediaPipe)" in SYSTEM_INSTRUCTION
-    assert "IoT water quality monitor (Arduino)" in SYSTEM_INSTRUCTION
+    assert "Biomedical Engineering, Electronics, IoT, and Python Data Analytics" in SYSTEM_INSTRUCTION
+    assert "CORE PRIORITIES" in SYSTEM_INSTRUCTION
+    assert "BROAD SEMANTIC MATCHING" in SYSTEM_INSTRUCTION
+    assert "STRICT REJECTIONS" in SYSTEM_INSTRUCTION
+    assert "Medical Device R&D" in SYSTEM_INSTRUCTION
+    assert "Biomedical Firmware" in SYSTEM_INSTRUCTION
     assert "visa_sponsorship" in SYSTEM_INSTRUCTION
-    assert "CRITICAL REJECTION CRITERIA" in SYSTEM_INSTRUCTION
-    assert "ACCEPTANCE CRITERIA" in SYSTEM_INSTRUCTION
-    assert "hospital-based clinical roles" in SYSTEM_INSTRUCTION
-    assert "R&D and product development roles" in SYSTEM_INSTRUCTION
+    assert "telemetry" not in SYSTEM_INSTRUCTION.lower()
     # Outreach draft instruction removed to conserve LLM generation tokens
     assert "linkedin_outreach_message" not in SYSTEM_INSTRUCTION
 

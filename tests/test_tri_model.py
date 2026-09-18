@@ -130,3 +130,90 @@ def test_executive_tie_breaker_database_update():
     assert ok_reject is True
     call_args_reject = mock_client.execute_query.call_args[0]
     assert "rejected" in call_args_reject[1]
+
+
+def test_get_pending_groq_jobs():
+    """Verify get_pending_groq_jobs queries Turso with pending_groq_verification status."""
+    from database import get_pending_groq_jobs
+
+    mock_client = MagicMock()
+    mock_rows = [
+        {
+            "job_id": "j1",
+            "title": "Software Engineer Healthcare",
+            "company": "HealthCorp",
+            "status": "pending_groq_verification",
+        }
+    ]
+    mock_client.execute_query = AsyncMock(return_value={
+        "results": [
+            {
+                "type": "ok",
+                "response": {
+                    "type": "execute",
+                    "result": {
+                        "cols": [{"name": k} for k in mock_rows[0].keys()],
+                        "rows": [[{"type": "text", "value": v} for v in mock_rows[0].values()]],
+                    },
+                },
+            }
+        ]
+    })
+    mock_client.session = None
+
+    jobs = asyncio.run(get_pending_groq_jobs(limit=10, client=mock_client))
+    assert len(jobs) == 1
+    assert jobs[0]["job_id"] == "j1"
+    assert jobs[0]["status"] == "pending_groq_verification"
+
+    call_args = mock_client.execute_query.call_args[0]
+    assert "pending_groq_verification" in call_args[0]
+
+
+def test_route_b_fallback_ambiguity_openrouter_rejects():
+    """When Groq is offline, solo OpenRouter rejects -> marked rejected."""
+    from main import query_model
+
+    mock_or = MagicMock()
+    mock_or.chat.completions.create = AsyncMock(return_value=MagicMock(
+        choices=[MagicMock(message=MagicMock(content='{"is_match": false, "ai_score": 10, "visa_sponsorship": "None"}'))]
+    ))
+
+    or_res = asyncio.run(query_model(mock_or, "deepseek/deepseek-chat", "Prompt"))
+    assert or_res is not None
+    assert or_res["is_match"] is False
+
+
+def test_route_b_fallback_ambiguity_openrouter_accepts():
+    """When Groq is offline, solo OpenRouter accepts -> pending_groq_verification (no alert)."""
+    from main import query_model
+
+    mock_or = MagicMock()
+    mock_or.chat.completions.create = AsyncMock(return_value=MagicMock(
+        choices=[MagicMock(message=MagicMock(content='{"is_match": true, "ai_score": 75, "visa_sponsorship": "Local"}'))]
+    ))
+
+    or_res = asyncio.run(query_model(mock_or, "deepseek/deepseek-chat", "Prompt"))
+    assert or_res is not None
+    assert or_res["is_match"] is True
+    # The pipeline sets status = 'pending_groq_verification' and does NOT alert
+
+
+def test_target_urls_and_spam_keywords_configured():
+    """Verify hybrid TARGET_URLS and reinforced SPAM_KEYWORDS are populated."""
+    from filters import SPAM_KEYWORDS
+
+    assert hasattr(config, "TARGET_URLS")
+    assert len(config.TARGET_URLS) == 8
+    assert "https://www.naukri.com/medical-device-rnd-jobs" in config.TARGET_URLS
+    assert "https://www.naukri.com/software-engineer-medical-device-jobs" in config.TARGET_URLS
+
+    expected_spam = [
+        "sales", "bde", "business development", "marketing", "representative",
+        "field service", "maintenance", "repair technician", "service engineer",
+        "billing", "pharmacist", "receptionist", "clerk", "bpo", "helpdesk",
+        "customer support", "voice process", "telecaller",
+    ]
+    for kw in expected_spam:
+        assert kw in SPAM_KEYWORDS
+
