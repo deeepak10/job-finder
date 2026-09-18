@@ -80,6 +80,7 @@ class JobResult:
     job_id: str = ""
     is_international: bool = False
     posted: str = ""
+    tier: str = "strict"
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -87,6 +88,7 @@ class JobResult:
         self.company = clean(self.company)
         self.location = clean(self.location)
         self.platform = (self.platform or "").strip().lower()
+        self.tier = (self.tier or "strict").strip().lower()
         self.url = clean_job_url(self.url, self.platform)
         self.is_international = not is_india(self.location)
         if not self.job_id:

@@ -62,7 +62,7 @@ def build_search_url(slug: str, keyword: str, page: int = 1) -> str:
     return f"{url}?k={quote_plus(keyword)}"
 
 
-async def _scrape_page(page, url: str) -> list[JobResult]:
+async def _scrape_page(page, url: str, tier: str = "strict") -> list[JobResult]:
     try:
         await page.goto(url, timeout=config.NAUKRI_TIMEOUT_MS, wait_until="domcontentloaded")
     except Exception as exc:
@@ -96,9 +96,10 @@ async def _scrape_page(page, url: str) -> list[JobResult]:
                 description=await _first_text(card, SELECTORS["snippet"]),
                 url=link,
                 platform=PLATFORM,
+                tier=tier,
             )
         )
-    log.info("naukri: %d card(s) from %s", len(jobs), url)
+    log.info("naukri: %d card(s) from %s (tier: %s)", len(jobs), url, tier)
     return jobs
 
 
@@ -133,15 +134,26 @@ async def scrape(headless: bool = True) -> list[JobResult]:
             else route.continue_(),
         )
 
+        # Partitioned searches: strict MedTech vs broad generic
+        searches_with_tier: list[tuple[str, str, str]] = [
+            (slug, kw, "strict") for slug, kw in getattr(config, "NAUKRI_STRICT_SEARCHES", [])
+        ] + [
+            (slug, kw, "broad") for slug, kw in getattr(config, "NAUKRI_BROAD_SEARCHES", [])
+        ]
+        if not searches_with_tier:
+            searches_with_tier = [
+                (slug, kw, config.get_query_tier(slug)) for slug, kw in config.NAUKRI_SEARCHES
+            ]
+
         try:
-            for slug, keyword in config.NAUKRI_SEARCHES:
+            for slug, keyword, tier in searches_with_tier:
                 # Strictly limit to 1 page per query (top 15-20 latest results)
                 max_pages = min(getattr(config, "NAUKRI_MAX_PAGES", 1), 1)
                 for page_no in range(1, max_pages + 1):
                     url = build_search_url(slug, keyword, page_no)
                     try:
                         query_jobs = await asyncio.wait_for(
-                            _scrape_page(page, url),
+                            _scrape_page(page, url, tier=tier),
                             timeout=30.0,
                         )
                         results.extend(query_jobs[:20])

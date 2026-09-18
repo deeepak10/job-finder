@@ -51,7 +51,7 @@ def _pick_apply_link(result: dict[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
-def _to_job(result: dict[str, Any]) -> Optional[JobResult]:
+def _to_job(result: dict[str, Any], tier: str = "strict") -> Optional[JobResult]:
     url, platform = _pick_apply_link(result)
     if not url:
         return None      # posting exists only on a board we don't track
@@ -63,6 +63,7 @@ def _to_job(result: dict[str, Any]) -> Optional[JobResult]:
         url=url,
         platform=platform,
         posted=(result.get("detected_extensions") or {}).get("posted_at", ""),
+        tier=tier,
         raw=result,
     )
 
@@ -170,6 +171,7 @@ async def _scrape_locations_async(
 
         async def _fetch_one(query: str, location: str) -> list[JobResult]:
             query_jobs: list[JobResult] = []
+            tier = config.get_query_tier(query)
             for page in range(max_pages):
                 try:
                     raw = await asyncio.wait_for(
@@ -187,7 +189,7 @@ async def _scrape_locations_async(
                 if not raw:
                     break
                 for r in raw[:max_results]:
-                    job = _to_job(r)
+                    job = _to_job(r, tier=tier)
                     if job:
                         query_jobs.append(job)
             return query_jobs[:max_results]

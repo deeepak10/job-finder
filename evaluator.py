@@ -566,7 +566,7 @@ async def evaluate_with_consensus(
     groq_match = bool(groq_res.get("is_match", False))
     router_match = bool(openrouter_res.get("is_match", False))
 
-    # Strict Consensus Reconciliation: Both must agree it's a match
+    # 1. Both ACCEPT -> Consensus Passed
     if groq_match and router_match:
         groq_score = groq_res.get("ai_score") or 0
         router_score = openrouter_res.get("ai_score") or 0
@@ -578,9 +578,19 @@ async def evaluate_with_consensus(
             "status": "consensus_passed",
         }
 
-    # Disagreement or false results are deferred to keep signal precision clean
-    log.info("Consensus conflict: Groq match=%s, OpenRouter match=%s. Deferring job.", groq_match, router_match)
-    return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "status": "deferred"}
+    # 2. Both REJECT -> Consensus Failed (definitive rejection)
+    if not groq_match and not router_match:
+        log.info("Consensus failed: Both Groq and OpenRouter rejected candidate job.")
+        return {
+            "is_match": False,
+            "visa_sponsorship": "Rejected",
+            "ai_score": 0,
+            "status": "consensus_failed",
+        }
+
+    # 3. Split Decision -> Conflict (parked for Gemini executive tie-breaker)
+    log.info("Consensus conflict: Groq match=%s, OpenRouter match=%s. Deferring as conflict.", groq_match, router_match)
+    return {"is_match": False, "visa_sponsorship": "Conflict", "ai_score": 0, "status": "conflict"}
 
 
 async def evaluate_job_consensus(

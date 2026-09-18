@@ -80,6 +80,7 @@ async def scrape_workday_async() -> list[dict[str, Any]]:
                             "url": company["url"].replace("/wday/cxs", "") + external_path,
                             "description": description,
                             "source": "Workday ATS",
+                            "tier": "strict",
                         })
             except Exception as e:
                 logger.error(f"Failed to scrape Workday for {company['name']}: {e}")

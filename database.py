@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS job_postings (
     visa_sponsorship    TEXT,
     date_found          TEXT,
     alert_sent          INTEGER DEFAULT 0,
-    status              TEXT DEFAULT 'active'
+    status              TEXT DEFAULT 'active',
+    tier                TEXT DEFAULT 'strict'
 );
 """
 
@@ -53,6 +54,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_jobs_date_found ON job_postings (date_found DESC);",
     "CREATE INDEX IF NOT EXISTS idx_jobs_score ON job_postings (ai_score DESC);",
     "CREATE INDEX IF NOT EXISTS idx_jobs_status ON job_postings (status);",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_tier ON job_postings (tier);",
 ]
 
 
@@ -149,10 +151,11 @@ async def init_db(client: Optional[AsyncTursoConnection] = None) -> None:
         for idx_sql in INDEXES:
             await client.execute_query(idx_sql)
 
-        # Ensure description and status columns exist for schema migrations
+        # Ensure description, status, and tier columns exist for schema migrations
         for col_def in (
             ("description", "TEXT"),
             ("status", "TEXT DEFAULT 'active'"),
+            ("tier", "TEXT DEFAULT 'strict'"),
         ):
             try:
                 await client.execute_query(f"ALTER TABLE job_postings ADD COLUMN {col_def[0]} {col_def[1]};")
@@ -336,13 +339,14 @@ async def add_job(
     date_found = job.get("date_found") or datetime.now(timezone.utc).isoformat(timespec="seconds")
     alert_sent = int(bool(job.get("alert_sent", 0)))
     status = (job.get("status") or "active").strip()
+    tier = (job.get("tier") or "strict").strip().lower()
 
     sql = """
     INSERT OR REPLACE INTO job_postings (
         job_id, title, company, location, platform, url,
         description, ai_score, visa_sponsorship, date_found,
-        alert_sent, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        alert_sent, status, tier
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     args = [
         job_id,
@@ -357,6 +361,7 @@ async def add_job(
         date_found,
         alert_sent,
         status,
+        tier,
     ]
 
     close_client = False
@@ -415,16 +420,18 @@ async def update_job_status(
     ai_score: Optional[int] = None,
     visa_sponsorship: Optional[str] = None,
     alert_sent: Optional[int] = None,
+    tier: Optional[str] = None,
     client: Optional[AsyncTursoConnection] = None,
 ) -> bool:
     """Update status, score, visa sponsorship, and alert status for an existing job posting.
 
     Args:
         job_id: Unique primary key of the job posting.
-        status: New status (e.g., 'active', 'consensus_passed', 'deferred').
+        status: New status (e.g., 'active', 'consensus_passed', 'deferred', 'rejected').
         ai_score: Optional integer score.
         visa_sponsorship: Optional visa sponsorship string.
         alert_sent: Optional flag (0 or 1).
+        tier: Optional tier string ('strict' or 'broad').
         client: Optional shared AsyncTursoConnection instance.
 
     Returns:
@@ -442,6 +449,9 @@ async def update_job_status(
     if alert_sent is not None:
         updates.append("alert_sent = ?")
         args.append(int(bool(alert_sent)))
+    if tier is not None:
+        updates.append("tier = ?")
+        args.append(tier.strip().lower())
 
     args.append(job_id)
     sql = f"UPDATE job_postings SET {', '.join(updates)} WHERE job_id = ?"

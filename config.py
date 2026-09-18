@@ -100,7 +100,7 @@ def validate_configuration() -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
-# Target Scraper Queries (Functional R&D Skills)
+# Target Scraper Queries (Strict MedTech vs Broad Generic)
 # --------------------------------------------------------------------------
 TARGET_QUERIES = [
     "Medical Device R&D",
@@ -112,9 +112,41 @@ TARGET_QUERIES = [
     "R&D Engineer Medical",
 ]
 
+STRICT_QUERIES = [
+    "Medical Device R&D",
+    "Biomedical Firmware",
+    "Medical IoT",
+    "IoT Medical Devices",
+    "Signal Processing Engineer",
+    "R&D Engineer Medical",
+]
+
+BROAD_QUERIES = [
+    "Embedded Software Engineer Healthcare",
+    "Python Developer Healthcare",
+    "Research and Development Engineer",
+    "Python Healthtech",
+]
+
 # --------------------------------------------------------------------------
-# Naukri
+# Naukri Searches (Partitioned into Strict and Broad Tiers)
 # --------------------------------------------------------------------------
+NAUKRI_STRICT_SEARCHES = [
+    ("medical-device-rnd-jobs", "Medical Device R&D"),
+    ("biomedical-firmware-jobs", "Biomedical Firmware"),
+    ("medical-iot-jobs", "Medical IoT"),
+    ("iot-medical-devices-jobs", "IoT Medical Devices"),
+    ("signal-processing-engineer-jobs", "Signal Processing Engineer"),
+    ("rnd-engineer-medical-jobs", "R&D Engineer Medical"),
+]
+
+NAUKRI_BROAD_SEARCHES = [
+    ("embedded-software-engineer-healthcare-jobs", "Embedded Software Engineer Healthcare"),
+    ("python-developer-healthcare-jobs", "Python Developer Healthcare"),
+    ("research-and-development-engineer-jobs", "Research and Development Engineer"),
+    ("python-healthtech-jobs", "Python Healthtech"),
+]
+
 NAUKRI_SEARCHES = [
     ("medical-device-rnd-jobs", "Medical Device R&D"),
     ("biomedical-firmware-jobs", "Biomedical Firmware"),
@@ -123,7 +155,30 @@ NAUKRI_SEARCHES = [
     ("python-healthtech-jobs", "Python Healthtech"),
     ("signal-processing-engineer-jobs", "Signal Processing Engineer"),
     ("rnd-engineer-medical-jobs", "R&D Engineer Medical"),
+    ("embedded-software-engineer-healthcare-jobs", "Embedded Software Engineer Healthcare"),
+    ("python-developer-healthcare-jobs", "Python Developer Healthcare"),
+    ("research-and-development-engineer-jobs", "Research and Development Engineer"),
 ]
+
+
+def get_query_tier(slug_or_query: str) -> str:
+    """Determine whether a search slug or query string belongs to 'strict' or 'broad' tier."""
+    s = (slug_or_query or "").lower().strip()
+    broad_indicators = [
+        "embedded-software-engineer-healthcare",
+        "python-developer-healthcare",
+        "research-and-development-engineer",
+        "python healthtech",
+        "embedded software engineer healthcare",
+        "python developer healthcare",
+        "research and development engineer",
+    ]
+    for b in broad_indicators:
+        if b in s:
+            return "broad"
+    return "strict"
+
+
 NAUKRI_BASE = "https://www.naukri.com"
 NAUKRI_MAX_PAGES = 1  # Strictly limited to 1 page for freshest listings
 NAUKRI_MIN_DELAY = 2.0   # seconds between page loads

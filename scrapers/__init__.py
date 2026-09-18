@@ -63,6 +63,7 @@ async def collect_all_async(
                         platform=item.get("source", item.get("platform", name)),
                         location=item.get("location", ""),
                         description=item.get("description", ""),
+                        tier=item.get("tier", "strict"),
                         raw=item,
                     ))
             log.info("%s scraper collected %d job(s)", name, len(res))

@@ -52,10 +52,14 @@ from evaluator import (
     GeminiQuotaExceededError,
     GroqQuotaExceededError,
     JobEvaluation,
+    build_job_prompt,
     evaluate_job,
     evaluate_job_consensus,
     evaluate_job_groq,
     evaluate_with_consensus,
+    groq_client,
+    openrouter_client,
+    query_model,
 )
 from filters import clean_html_text, is_spam_title
 from scrapers import collect_all, collect_all_async
@@ -196,6 +200,9 @@ class PipelineMetrics:
         self.high_matches: int = 0
         self.alerts_sent: int = 0
         self.deferred_added: int = 0
+        self.rejected: int = 0
+        self.strict_evaluated: int = 0
+        self.broad_gatekept: int = 0
         self.lock = asyncio.Lock()
 
     async def inc_seen(self) -> None:
@@ -206,7 +213,15 @@ class PipelineMetrics:
         async with self.lock:
             self.spam_discarded += 1
 
-    async def inc_evaluated(self, is_high_match: bool, alerted: bool, is_deferred: bool = False) -> None:
+    async def inc_evaluated(
+        self,
+        is_high_match: bool,
+        alerted: bool,
+        is_deferred: bool = False,
+        is_rejected: bool = False,
+        is_strict: bool = False,
+        is_broad: bool = False,
+    ) -> None:
         async with self.lock:
             self.evaluated += 1
             if is_high_match:
@@ -215,6 +230,12 @@ class PipelineMetrics:
                 self.alerts_sent += 1
             if is_deferred:
                 self.deferred_added += 1
+            if is_rejected:
+                self.rejected += 1
+            if is_strict:
+                self.strict_evaluated += 1
+            if is_broad:
+                self.broad_gatekept += 1
 
 
 async def process_job(
@@ -503,230 +524,345 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     current_hour_utc = datetime.now(timezone.utc).hour
     is_morning_run = current_hour_utc <= 4
     sweep_deferred = is_morning_run or getattr(args, "re_eval_deferred", False)
+    deferred_jobs_to_sweep: list[dict[str, Any]] = []
 
     if sweep_deferred and not args.dry_run and config.TURSO_DATABASE_URL and config.TURSO_AUTH_TOKEN:
         try:
             pending_deferred = await get_deferred_jobs(limit=50)
             if pending_deferred:
                 log.info(
-                    "Morning run/flag detected: Swept %d deferred job(s) from Turso queue for re-evaluation.",
+                    "Morning run/flag detected: Swept %d deferred job(s) from Turso queue for Gemini executive tie-breaking.",
                     len(pending_deferred),
                 )
-                print(f"[{_ts()}] [Queue] Swept {len(pending_deferred)} deferred job(s) from Turso for morning re-evaluation.")
+                print(f"[{_ts()}] [Executive Tie-Breaker] Swept {len(pending_deferred)} deferred job(s) for Gemini re-evaluation.")
                 metrics.deferred_swept = len(pending_deferred)
-                seen_ids = {title_company_hash(j.title, j.company) for j in candidate_jobs}
-                for d_job in pending_deferred:
-                    d_hash = d_job.get("job_id") or title_company_hash(d_job.get("title", ""), d_job.get("company", ""))
-                    if d_hash not in seen_ids:
-                        candidate_jobs.append(JobResult(
-                            title=d_job.get("title", ""),
-                            company=d_job.get("company", ""),
-                            url=d_job.get("url", ""),
-                            platform=d_job.get("platform", "deferred"),
-                            location=d_job.get("location", ""),
-                            description=d_job.get("description", ""),
-                        ))
-                        seen_ids.add(d_hash)
+                deferred_jobs_to_sweep = pending_deferred
         except Exception as exc:
             log.warning("Could not sweep deferred jobs from Turso: %s", exc)
 
-    if not candidate_jobs:
+    if not candidate_jobs and not deferred_jobs_to_sweep:
         log.info("No fresh candidate or deferred jobs to evaluate. Exiting pipeline.")
         return
 
     # =========================================================================
-    # Phase 3: [Gemini Evaluation Phase]
+    # Phase 3: Tri-Model Evaluation Phase (Executive Tie-Breaker)
     # =========================================================================
     t_eval_start = time.perf_counter()
     # Smart Quota Slicing: Process max 6 candidate jobs per run only when fallbacks are not configured
     if not getattr(config, "GROQ_API_KEY", None) and not getattr(config, "OPENROUTER_API_KEY", None):
         candidate_jobs = candidate_jobs[:6]
 
-    print(f"\n[{_ts()}] >>> [Evaluation Phase] START | Evaluating {len(candidate_jobs)} jobs")
+    print(f"\n[{_ts()}] >>> [Tri-Model Evaluation Phase] START | Evaluating {len(candidate_jobs)} fresh jobs, {len(deferred_jobs_to_sweep)} deferred")
 
-    # Concurrency control: asyncio.Semaphore(1) for LLM evaluation (sequential processing)
     semaphore = asyncio.Semaphore(1)
-
-    async def evaluate_and_persist(
-        job: JobResult,
-        session: aiohttp.ClientSession,
-        use_fallback: bool = False,
-        use_consensus: bool = False,
-        groq_client: Any = None,
-    ) -> None:
-        job_payload = {
-            "title": job.title,
-            "company": job.company,
-            "location": job.location,
-            "platform": job.platform,
-            "description": job.description,
-            "url": job.url,
-        }
-        if not use_fallback:
-            evaluation = await evaluate_job(job_payload, semaphore)
-        elif use_consensus:
-            # Dual-model consensus fallback (Groq + OpenRouter)
-            evaluation = await evaluate_job_consensus(job_payload)
-        else:
-            evaluation = await evaluate_job_groq(job_payload, groq_client)
-
-        if not evaluation:
-            log.warning("Evaluation failed, timed out, or skipped for '%s' @ %s", job.title, job.company)
-            return
-
-        status_val = getattr(evaluation, "status", "active")
-        is_high_match = bool(evaluation.is_match)
-        job_id = title_company_hash(job.title, job.company)
-        record = {
-            "job_id": job_id,
-            "title": job.title,
-            "company": job.company,
-            "location": job.location,
-            "platform": job.platform,
-            "url": job.url,
-            "description": job.description,
-            "ai_score": getattr(evaluation, "match_score", None),
-            "visa_sponsorship": evaluation.visa_sponsorship,
-            "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "alert_sent": 0,
-            "status": status_val,
-        }
-
-        if args.dry_run:
-            log.info(
-                "[DRY RUN] Evaluated '%s' @ %s -> Match: %s, Status: %s",
-                job.title,
-                job.company,
-                evaluation.is_match,
-                status_val,
-            )
-            await metrics.inc_evaluated(
-                is_high_match=(is_high_match and status_val != "deferred"),
-                alerted=False,
-                is_deferred=(status_val == "deferred"),
-            )
-            return
-
-        # Persistence to Turso Cloud (persists active, consensus_passed, and deferred records)
-        saved = await add_job(record)
-        if saved:
-            log.info("Saved evaluated job to Turso: '%s' @ %s (status: %s)", job.title, job.company, status_val)
-
-        # Layer 5: Non-Blocking Discord Notification Engine (Only alert on confirmed matches)
-        alert_delivered = False
-        if is_high_match and status_val != "deferred":
-            alert_delivered = await send_discord_alert_async(job_payload, evaluation, session=session)
-            if alert_delivered:
-                await mark_alert_sent(job_id)
-
-        await metrics.inc_evaluated(
-            is_high_match=(is_high_match and status_val != "deferred"),
-            alerted=alert_delivered,
-            is_deferred=(status_val == "deferred"),
-        )
-
-    use_fallback = False
-    use_consensus = bool(getattr(config, "OPENROUTER_API_KEY", None))
-    groq_client = None
-    queue = list(candidate_jobs)
-    total_candidates = len(candidate_jobs)
-    eval_index = 0
+    gemini_quota_exhausted = False
 
     async with aiohttp.ClientSession() as session:
-        while queue:
-            job = queue.pop(0)
-            eval_index += 1
-            if not use_fallback:
-                provider_tag = "Gemini"
-            elif use_consensus:
-                provider_tag = "Ensemble Consensus (Groq + OpenRouter)"
-            else:
-                provider_tag = "Groq (Fallback Rotation)"
-
-            log.info(
-                "Evaluating candidate job %d/%d with %s: '%s' @ %s",
-                eval_index,
-                total_candidates,
-                provider_tag,
-                job.title,
-                job.company,
-            )
-            try:
-                if not use_fallback:
-                    await evaluate_and_persist(job, session, use_fallback=False)
-                else:
-                    if not use_consensus and not groq_client:
-                        if getattr(config, "GROQ_API_KEY", None):
-                            try:
-                                from groq import AsyncGroq
-                                groq_client = AsyncGroq(api_key=config.GROQ_API_KEY)
-                            except ImportError:
-                                log.error("groq package is not installed. Cannot use fallback. Aborting.")
-                                break
-                        else:
-                            log.error("Groq API key missing. Cannot use fallback. Aborting.")
-                            break
-
-                    await evaluate_and_persist(
-                        job,
-                        session,
-                        use_fallback=True,
-                        use_consensus=use_consensus,
-                        groq_client=groq_client,
-                    )
-
-            except Exception as exc:
-                error_msg = str(exc)
-                code = getattr(exc, "status_code", getattr(exc, "code", None))
-                is_quota = (
-                    isinstance(exc, (GeminiQuotaExceededError, GroqQuotaExceededError))
-                    or code == 429
-                    or "429" in error_msg
-                    or "RESOURCE_EXHAUSTED" in error_msg
+        # ---------------------------------------------------------------------
+        # Phase 3A: Deferred Queue Gemini Executive Tie-Breaker
+        # ---------------------------------------------------------------------
+        if deferred_jobs_to_sweep:
+            print(f"[{_ts()}] >>> [Executive Tie-Breaker] Evaluating {len(deferred_jobs_to_sweep)} deferred conflicts exclusively with Gemini")
+            for d_idx, d_job in enumerate(deferred_jobs_to_sweep, 1):
+                if gemini_quota_exhausted:
+                    log.info("Gemini quota exhausted; halting deferred tie-breaker sweep.")
+                    break
+                d_payload = {
+                    "title": d_job.get("title", ""),
+                    "company": d_job.get("company", ""),
+                    "location": d_job.get("location", ""),
+                    "platform": d_job.get("platform", "deferred"),
+                    "description": d_job.get("description", ""),
+                    "url": d_job.get("url", ""),
+                }
+                d_id = d_job.get("job_id") or title_company_hash(d_payload["title"], d_payload["company"])
+                log.info(
+                    "Executive Tie-Breaker %d/%d (Gemini): '%s' @ %s",
+                    d_idx, len(deferred_jobs_to_sweep), d_payload["title"], d_payload["company"],
                 )
-
-                if is_quota:
-                    if not use_fallback:
-                        log.warning(
-                            "Gemini API quota exhausted (429 RESOURCE_EXHAUSTED): %s. Activating secondary fallback...",
-                            exc,
+                try:
+                    eval_res = await evaluate_job(d_payload, semaphore)
+                    if eval_res:
+                        is_match = bool(eval_res.is_match)
+                        score = eval_res.match_score or 0
+                        new_status = "active" if is_match else "rejected"
+                        await update_job_status(
+                            job_id=d_id,
+                            status=new_status,
+                            ai_score=score,
+                            visa_sponsorship=eval_res.visa_sponsorship,
                         )
-                        print(f"[{_ts()}] [!] Gemini API quota exhausted (429). Activating secondary fallback tier...")
-                        use_fallback = True
-                        eval_index -= 1
-                        queue.insert(0, job)  # Retry current job with fallback
-                        continue
-                    else:
-                        log.warning("Secondary fallback quota/rate limit reached: %s. Deferring remaining queue to Turso.", exc)
-                        print(f"[{_ts()}] [!] Secondary fallback limit reached. Deferring remaining queue to Turso.")
-                        # Securely persist remaining jobs as deferred in Turso
-                        if not args.dry_run:
-                            for remaining_job in [job] + queue:
-                                rec = {
-                                    "job_id": title_company_hash(remaining_job.title, remaining_job.company),
-                                    "title": remaining_job.title,
-                                    "company": remaining_job.company,
-                                    "location": remaining_job.location,
-                                    "platform": remaining_job.platform,
-                                    "url": remaining_job.url,
-                                    "description": remaining_job.description,
-                                    "ai_score": 0,
-                                    "visa_sponsorship": "Unknown",
-                                    "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                                    "alert_sent": 0,
-                                    "status": "deferred",
-                                }
-                                await add_job(rec)
-                                metrics.deferred_added += 1
-                        break
+                        alert_sent = False
+                        if is_match and score >= 70:
+                            alert_sent = await send_discord_alert_async(d_payload, eval_res, session=session)
+                            if alert_sent:
+                                await mark_alert_sent(d_id)
+                        await metrics.inc_evaluated(
+                            is_high_match=(is_match and score >= 70),
+                            alerted=alert_sent,
+                            is_rejected=(not is_match),
+                            is_strict=True,
+                        )
+                except GeminiQuotaExceededError:
+                    gemini_quota_exhausted = True
+                    log.warning("Gemini quota exhausted during executive tie-breaker sweep. Remaining jobs stay deferred.")
+                    break
+                except Exception as exc:
+                    log.error("Error during executive tie-break for '%s': %s", d_payload["title"], exc)
+
+        # ---------------------------------------------------------------------
+        # Phase 3B: Fresh Candidate Jobs Tri-Model Routing
+        # ---------------------------------------------------------------------
+        total_candidates = len(candidate_jobs)
+        for eval_index, job in enumerate(candidate_jobs, 1):
+            job_payload = {
+                "title": job.title,
+                "company": job.company,
+                "location": job.location,
+                "platform": job.platform,
+                "description": job.description,
+                "url": job.url,
+            }
+            job_id = title_company_hash(job.title, job.company)
+            prompt = build_job_prompt(job_payload)
+            tier = getattr(job, "tier", "strict")
+
+            if tier == "strict":
+                # =============================================================
+                # ROUTE A: Strict MedTech Roles (Gemini Primary)
+                # =============================================================
+                log.info(
+                    "Evaluating candidate job %d/%d [Route A - Strict]: '%s' @ %s",
+                    eval_index, total_candidates, job.title, job.company,
+                )
+                evaluation = None
+                if not gemini_quota_exhausted:
+                    try:
+                        evaluation = await evaluate_job(job_payload, semaphore)
+                    except GeminiQuotaExceededError:
+                        gemini_quota_exhausted = True
+                        log.warning("Gemini quota exhausted (429). Activating Junior Consensus for strict roles.")
+
+                if evaluation:
+                    status_val = "active" if evaluation.is_match else "rejected"
+                    is_high_match = bool(evaluation.is_match and (evaluation.match_score or 0) >= 70)
+                    rec = {
+                        "job_id": job_id,
+                        "title": job.title,
+                        "company": job.company,
+                        "location": job.location,
+                        "platform": job.platform,
+                        "url": job.url,
+                        "description": job.description,
+                        "ai_score": evaluation.match_score,
+                        "visa_sponsorship": evaluation.visa_sponsorship,
+                        "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "alert_sent": 0,
+                        "status": status_val,
+                        "tier": "strict",
+                    }
+                    alert_delivered = False
+                    if not args.dry_run:
+                        await add_job(rec)
+                        if is_high_match:
+                            alert_delivered = await send_discord_alert_async(job_payload, evaluation, session=session)
+                            if alert_delivered:
+                                await mark_alert_sent(job_id)
+                    await metrics.inc_evaluated(
+                        is_high_match=is_high_match,
+                        alerted=alert_delivered,
+                        is_rejected=(not evaluation.is_match),
+                        is_strict=True,
+                    )
                 else:
-                    log.error("Unexpected evaluation error for '%s' @ %s: %s", job.title, job.company, exc)
+                    # Fallback to Junior Consensus (Groq + OpenRouter)
+                    log.info("Route A Fallback: Querying Junior Consensus for '%s' @ %s", job.title, job.company)
+                    consensus_eval = await evaluate_job_consensus(job_payload)
+                    c_status = consensus_eval.status
+
+                    if c_status == "consensus_passed":
+                        # Both ACCEPTED
+                        log.info("Junior Consensus PASSED for '%s' @ %s", job.title, job.company)
+                        rec = {
+                            "job_id": job_id,
+                            "title": job.title,
+                            "company": job.company,
+                            "location": job.location,
+                            "platform": job.platform,
+                            "url": job.url,
+                            "description": job.description,
+                            "ai_score": consensus_eval.ai_score or 75,
+                            "visa_sponsorship": consensus_eval.visa_sponsorship,
+                            "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "alert_sent": 0,
+                            "status": "consensus_passed",
+                            "tier": "strict",
+                        }
+                        alert_delivered = False
+                        if not args.dry_run:
+                            await add_job(rec)
+                            alert_delivered = await send_discord_alert_async(job_payload, consensus_eval, session=session)
+                            if alert_delivered:
+                                await mark_alert_sent(job_id)
+                        await metrics.inc_evaluated(is_high_match=True, alerted=alert_delivered, is_strict=True)
+
+                    elif c_status == "consensus_failed":
+                        # Both REJECTED
+                        log.info("Junior Consensus REJECTED '%s' @ %s", job.title, job.company)
+                        rec = {
+                            "job_id": job_id,
+                            "title": job.title,
+                            "company": job.company,
+                            "location": job.location,
+                            "platform": job.platform,
+                            "url": job.url,
+                            "description": job.description,
+                            "ai_score": 0,
+                            "visa_sponsorship": "Rejected",
+                            "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "alert_sent": 0,
+                            "status": "rejected",
+                            "tier": "strict",
+                        }
+                        if not args.dry_run:
+                            await add_job(rec)
+                        await metrics.inc_evaluated(is_high_match=False, alerted=False, is_rejected=True, is_strict=True)
+
+                    else:
+                        # Split decision (conflict) or quota/model failure -> Defer to Gemini tie-breaker
+                        log.info("Junior Consensus CONFLICT/DEFERRED for '%s' @ %s. Parked for Gemini tie-breaker.", job.title, job.company)
+                        rec = {
+                            "job_id": job_id,
+                            "title": job.title,
+                            "company": job.company,
+                            "location": job.location,
+                            "platform": job.platform,
+                            "url": job.url,
+                            "description": job.description,
+                            "ai_score": 0,
+                            "visa_sponsorship": "Conflict",
+                            "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "alert_sent": 0,
+                            "status": "deferred",
+                            "tier": "strict",
+                        }
+                        if not args.dry_run:
+                            await add_job(rec)
+                        await metrics.inc_evaluated(is_high_match=False, alerted=False, is_deferred=True, is_strict=True)
+
+            else:
+                # =============================================================
+                # ROUTE B: Broad Net (Groq Gatekeeper)
+                # =============================================================
+                log.info(
+                    "Evaluating candidate job %d/%d [Route B - Broad]: '%s' @ %s (Groq Gatekeeper)",
+                    eval_index, total_candidates, job.title, job.company,
+                )
+                groq_res = None
+                groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
+                try:
+                    groq_res = await query_model(groq_client, groq_model, prompt)
+                except Exception as exc:
+                    log.warning("Groq gatekeeper exception: %s. Falling back to OpenRouter.", exc)
+                    try:
+                        groq_res = await query_model(openrouter_client, getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat"), prompt)
+                    except Exception as or_exc:
+                        log.error("Gatekeeper fallback also failed: %s", or_exc)
+                        groq_res = None
+
+                if not groq_res or groq_res.get("is_match") is False:
+                    # Groq (or fallback) REJECTS -> Gatekeeper saved Gemini quota!
+                    log.info("Route B: Gatekeeper rejected '%s' @ %s. Saved Gemini quota.", job.title, job.company)
+                    rec = {
+                        "job_id": job_id,
+                        "title": job.title,
+                        "company": job.company,
+                        "location": job.location,
+                        "platform": job.platform,
+                        "url": job.url,
+                        "description": job.description,
+                        "ai_score": (groq_res.get("ai_score") if groq_res else 0) or 0,
+                        "visa_sponsorship": (groq_res.get("visa_sponsorship") if groq_res else "Rejected") or "Rejected",
+                        "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "alert_sent": 0,
+                        "status": "rejected",
+                        "tier": "broad",
+                    }
+                    if not args.dry_run:
+                        await add_job(rec)
+                    await metrics.inc_evaluated(is_high_match=False, alerted=False, is_rejected=True, is_broad=True)
                     continue
 
+                # Groq ACCEPTS -> Verify with OpenRouter
+                log.info("Route B: Gatekeeper accepted '%s' @ %s. Verifying with OpenRouter...", job.title, job.company)
+                or_model = getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat")
+                or_res = None
+                try:
+                    or_res = await query_model(openrouter_client, or_model, prompt)
+                except Exception as or_exc:
+                    log.warning("OpenRouter verification failed: %s", or_exc)
+                    or_res = None
+
+                if or_res and or_res.get("is_match") is True:
+                    # Both Pass -> Active
+                    avg_score = int(((groq_res.get("ai_score") or 75) + (or_res.get("ai_score") or 75)) / 2)
+                    log.info("Route B: Both models approved '%s' @ %s (Score: %d)", job.title, job.company, avg_score)
+                    eval_obj = JobEvaluation(
+                        is_match=True,
+                        visa_sponsorship=groq_res.get("visa_sponsorship") or or_res.get("visa_sponsorship") or "Not Specified",
+                        ai_score=avg_score,
+                        status="consensus_passed",
+                    )
+                    rec = {
+                        "job_id": job_id,
+                        "title": job.title,
+                        "company": job.company,
+                        "location": job.location,
+                        "platform": job.platform,
+                        "url": job.url,
+                        "description": job.description,
+                        "ai_score": avg_score,
+                        "visa_sponsorship": eval_obj.visa_sponsorship,
+                        "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "alert_sent": 0,
+                        "status": "consensus_passed",
+                        "tier": "broad",
+                    }
+                    alert_delivered = False
+                    if not args.dry_run:
+                        await add_job(rec)
+                        if avg_score >= 70:
+                            alert_delivered = await send_discord_alert_async(job_payload, eval_obj, session=session)
+                            if alert_delivered:
+                                await mark_alert_sent(job_id)
+                    await metrics.inc_evaluated(is_high_match=(avg_score >= 70), alerted=alert_delivered, is_broad=True)
+                else:
+                    # Groq YES, OpenRouter NO (or failed) -> Defer to Gemini tie-breaker
+                    log.info("Route B Split Decision for '%s' @ %s (Groq=True, OR=%s). Deferring to Gemini tie-breaker.",
+                             job.title, job.company, bool(or_res.get("is_match")) if or_res else None)
+                    rec = {
+                        "job_id": job_id,
+                        "title": job.title,
+                        "company": job.company,
+                        "location": job.location,
+                        "platform": job.platform,
+                        "url": job.url,
+                        "description": job.description,
+                        "ai_score": groq_res.get("ai_score") or 0,
+                        "visa_sponsorship": groq_res.get("visa_sponsorship") or "Conflict",
+                        "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "alert_sent": 0,
+                        "status": "deferred",
+                        "tier": "broad",
+                    }
+                    if not args.dry_run:
+                        await add_job(rec)
+                    await metrics.inc_evaluated(is_high_match=False, alerted=False, is_deferred=True, is_broad=True)
+
     t_eval_elapsed = time.perf_counter() - t_eval_start
-    log.info("========== [Gemini Evaluation Phase] END (%s) | Duration: %.2fs | Evaluated: %d jobs ==========",
+    log.info("========== [Tri-Model Evaluation Phase] END (%s) | Duration: %.2fs | Evaluated: %d jobs ==========",
              _ts(), t_eval_elapsed, metrics.evaluated)
-    print(f"[{_ts()}] >>> [Gemini Evaluation Phase] END | Duration: {t_eval_elapsed:.2f}s | Evaluated: {metrics.evaluated} jobs")
+    print(f"[{_ts()}] >>> [Tri-Model Evaluation Phase] END | Duration: {t_eval_elapsed:.2f}s | Evaluated: {metrics.evaluated} jobs")
 
     total_elapsed = time.perf_counter() - pipeline_start
     log.info("Pipeline execution completed in %.2f seconds.", total_elapsed)
@@ -739,6 +875,9 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     print(f" * Layer 0 Skipped (Seen)   : {metrics.seen_skipped}")
     print(f" * Layer 1 Discarded (Spam) : {metrics.spam_discarded}")
     print(f" * Layer 4 Evaluated (AI)   : {metrics.evaluated}")
+    print(f" * Strict Roles Evaluated   : {metrics.strict_evaluated}")
+    print(f" * Broad Roles Gatekept     : {metrics.broad_gatekept}")
+    print(f" * Rejections (Quota Saved) : {metrics.rejected}")
     print(f" * High Matches (>= 70)     : {metrics.high_matches}")
     print(f" * Discord Alerts Sent      : {metrics.alerts_sent}")
     print(f" * Jobs Deferred To Queue   : {metrics.deferred_added}")

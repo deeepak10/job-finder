@@ -72,7 +72,7 @@ def test_evaluate_with_consensus_agreement(monkeypatch):
 
 
 def test_evaluate_with_consensus_conflict(monkeypatch):
-    """Ensure evaluate_with_consensus defers job when models conflict."""
+    """Ensure evaluate_with_consensus returns conflict when models disagree."""
     monkeypatch.setattr(config, "GROQ_API_KEY", "mock-groq-key")
     monkeypatch.setattr(config, "OPENROUTER_API_KEY", "mock-router-key")
 
@@ -89,7 +89,29 @@ def test_evaluate_with_consensus_conflict(monkeypatch):
     result = asyncio.run(evaluate_with_consensus("Prompt", groq_cli=mock_groq, router_cli=mock_router))
 
     assert result["is_match"] is False
-    assert result["status"] == "deferred"
+    assert result["status"] == "conflict"
+    assert result["ai_score"] == 0
+
+
+def test_evaluate_with_consensus_both_rejected(monkeypatch):
+    """Ensure evaluate_with_consensus returns consensus_failed when both models reject."""
+    monkeypatch.setattr(config, "GROQ_API_KEY", "mock-groq-key")
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", "mock-router-key")
+
+    mock_groq = MagicMock()
+    mock_groq_choice = MagicMock()
+    mock_groq_choice.message.content = '{"is_match": false, "visa_sponsorship": "None", "ai_score": 20}'
+    mock_groq.chat.completions.create = AsyncMock(return_value=MagicMock(choices=[mock_groq_choice]))
+
+    mock_router = MagicMock()
+    mock_router_choice = MagicMock()
+    mock_router_choice.message.content = '{"is_match": false, "visa_sponsorship": "None", "ai_score": 25}'
+    mock_router.chat.completions.create = AsyncMock(return_value=MagicMock(choices=[mock_router_choice]))
+
+    result = asyncio.run(evaluate_with_consensus("Prompt", groq_cli=mock_groq, router_cli=mock_router))
+
+    assert result["is_match"] is False
+    assert result["status"] == "consensus_failed"
     assert result["ai_score"] == 0
 
 
