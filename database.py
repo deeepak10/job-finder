@@ -557,10 +557,17 @@ async def get_stats(client: Optional[AsyncTursoConnection] = None) -> dict[str, 
         alerted_rows = parse_turso_rows(alerted_res)
         alerted = int(alerted_rows[0]["alerted"]) if alerted_rows else 0
 
+        deferred_res = await client.execute_query(
+            "SELECT COUNT(*) AS deferred FROM job_postings WHERE status = 'deferred'"
+        )
+        deferred_rows = parse_turso_rows(deferred_res)
+        deferred = int(deferred_rows[0]["deferred"]) if deferred_rows else 0
+
         return {
             "total_jobs": total,
             "high_match_jobs (>=70)": high_scores,
             "alerts_dispatched": alerted,
+            "deferred_jobs": deferred,
             "by_platform": by_platform,
         }
     finally:
