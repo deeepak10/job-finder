@@ -137,6 +137,7 @@ def print_config_check() -> None:
     print(f" * Gemini API Key      : {config.mask_secret(config.GEMINI_API_KEY, 6, 6)}")
     print(f" * Gemini Model        : {config.GEMINI_MODEL}")
     print(f" * Groq API Key        : {config.mask_secret(config.GROQ_API_KEY, 4, 4)}")
+    print(f" * Groq Model          : {getattr(config, 'GROQ_MODEL', 'llama-3.1-8b-instant')}")
     print(f" * Discord Webhook     : {config.mask_secret(config.DISCORD_WEBHOOK_URL, 35, 6)}")
     print(f" * SerpApi Key         : {config.mask_secret(config.SERPAPI_API_KEY, 4, 4)}")
     print(f" * Apify Token         : {config.mask_secret(config.APIFY_TOKEN, 8, 4)}")
@@ -374,7 +375,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
         2. Deduplication & Filtering Phase: Layer 0 O(1) Turso indexed URL/hash dedup,
            followed by Layer 1 regex spam filtering and Layer 2 text cleaning.
         3. Multi-Provider LLM Evaluation Phase: Primary evaluation via Gemini 3.6 Flash
-           with 4.5s pacing, failing over seamlessly to Groq Llama-3.3-70B (with 6s pacing)
+           with 4.5s pacing, failing over seamlessly to Groq Llama-3.1-8B (with 6s pacing)
            upon encountering HTTP 429 RESOURCE_EXHAUSTED.
         4. Persistence & Notifications: Saves match records to Turso Cloud SQLite and
            dispatches rich embeds to Discord for high-match roles (is_match=True).
@@ -554,7 +555,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
         while queue:
             job = queue.pop(0)
             eval_index += 1
-            provider_tag = "Groq (Llama-3.3-70B)" if use_groq_fallback else "Gemini"
+            provider_tag = "Groq (Llama-3.1-8B)" if use_groq_fallback else "Gemini"
             log.info(
                 "Evaluating candidate job %d/%d with %s: '%s' @ %s",
                 eval_index,
@@ -567,7 +568,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                 if not use_groq_fallback:
                     await evaluate_and_persist(job, session, use_groq=False)
                 else:
-                    # Fallback: Groq Llama-3.3-70B Execution
+                    # Fallback: Groq Llama-3.1-8B Execution
                     if not groq_client:
                         if getattr(config, "GROQ_API_KEY", None):
                             try:
@@ -595,10 +596,10 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                 if is_quota:
                     if not use_groq_fallback:
                         log.warning(
-                            "Gemini API quota exhausted (429 RESOURCE_EXHAUSTED): %s. Activating Groq Llama-3.3-70B fallback...",
+                            "Gemini API quota exhausted (429 RESOURCE_EXHAUSTED): %s. Activating Groq Llama-3.1-8B fallback...",
                             exc,
                         )
-                        print(f"[{_ts()}] [!] Gemini API quota exhausted (429). Activating Groq Llama-3.3-70B fallback...")
+                        print(f"[{_ts()}] [!] Gemini API quota exhausted (429). Activating Groq Llama-3.1-8B fallback...")
                         use_groq_fallback = True
                         eval_index -= 1
                         queue.insert(0, job)  # Retry current job with Groq

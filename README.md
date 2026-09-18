@@ -3,15 +3,15 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Database: Turso](https://img.shields.io/badge/database-Turso%20(LibSQL)-00EB8D.svg?logo=sqlite&logoColor=black)](https://turso.tech/)
 [![Primary LLM: Gemini](https://img.shields.io/badge/primary%20LLM-Gemini%203.6%20Flash-4285F4.svg?logo=google&logoColor=white)](https://ai.google.dev/)
-[![Fallback LLM: Groq](https://img.shields.io/badge/fallback%20LLM-Groq%20Llama--3.3--70B-F55036.svg?logo=meta&logoColor=white)](https://groq.com/)
+[![Fallback LLM: Groq](https://img.shields.io/badge/fallback%20LLM-Groq%20Llama--3.1--8B-F55036.svg?logo=meta&logoColor=white)](https://groq.com/)
 [![Browser Automation](https://img.shields.io/badge/automation-Playwright%20Chromium-2EAD33.svg?logo=playwright&logoColor=white)](https://playwright.dev/)
 [![CI/CD: GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions%20(Hardened)-2088FF.svg?logo=github-actions&logoColor=white)](https://github.com/features/actions)
-[![Tests: Pytest](https://img.shields.io/badge/tests-111%20passed-brightgreen.svg?logo=pytest&logoColor=white)](https://pytest.org/)
+[![Tests: Pytest](https://img.shields.io/badge/tests-112%20passed-brightgreen.svg?logo=pytest&logoColor=white)](https://pytest.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 An enterprise-grade, asynchronous Python intelligence pipeline designed to autonomously scrape, deduplicate, filter, semantically evaluate, and deliver real-time alerts for **Biomedical R&D**, **Medical Device Firmware**, **HealthTech**, and **Embedded Systems** engineering opportunities across global epicenters and regional Indian engineering hubs.
 
-Engineered with a **resilient multi-provider LLM waterfall** (Google Gemini &rarr; Groq Llama-3.3-70B), **zero-cost direct enterprise ATS ingestion** (Medtronic, Philips), **quota time-gating**, **serverless cloud persistence** (Turso Cloud LibSQL), and **async Discord notification dispatch**.
+Engineered with a **resilient multi-provider LLM waterfall** (Google Gemini &rarr; Groq Llama-3.1-8B), **zero-cost direct enterprise ATS ingestion** (Medtronic, Philips), **quota time-gating**, **serverless cloud persistence** (Turso Cloud LibSQL), and **async Discord notification dispatch**.
 
 ---
 
@@ -44,7 +44,7 @@ flowchart TD
     subgraph EVAL["4. Dual-Provider LLM Waterfall (Paced Evaluation)"]
         GEMINI["Primary: Gemini 3.6 Flash<br/>(20 daily requests, 4.5s pacing)"]
         FALLBACK_CHECK{"429 Quota Exceeded?"}
-        GROQ["Fallback: Groq Llama-3.3-70B<br/>(12K TPM cap, strict 6s pacing)"]
+        GROQ["Fallback: Groq Llama-3.1-8B<br/>(12K TPM cap, strict 6s pacing)"]
     end
 
     subgraph PERSIST_ALERT["5. Persistence & Delivery"]
@@ -83,9 +83,9 @@ flowchart TD
 * Queries unauthenticated REST career endpoints for Tier-1 MedTech conglomerates (**Medtronic**, **Philips**) before postings hit third-party aggregators.
 * Executes a primary search `POST` followed by an automated secondary detail `GET` request (`jobPostingInfo.jobDescription`) to hydrate the complete posting text for LLM semantic evaluation.
 
-### 2. Multi-Provider LLM Waterfall (Gemini &rarr; Groq Llama-3.3-70B)
+### 2. Multi-Provider LLM Waterfall (Gemini &rarr; Groq Llama-3.1-8B)
 * **Primary Stage:** Evaluates candidates through Google Gemini (`gemini-3.6-flash`) with structured Pydantic schemas and 4.5-second pacing delay to exhaust the 20 free daily requests.
-* **Autonomous Failover:** Catches `429 RESOURCE_EXHAUSTED` and immediately switches the evaluation queue to Groq Cloud (`llama-3.3-70b-versatile`).
+* **Autonomous Failover:** Catches `429 RESOURCE_EXHAUSTED` and immediately switches the evaluation queue to Groq Cloud (`llama-3.1-8b-instant`).
 * **Rate-Limit Pacer:** Enforces a strict 6-second `asyncio.sleep()` per evaluation on Groq to respect the 12,000 Tokens Per Minute (TPM) free-tier ceiling.
 
 ### 3. API Quota Time-Gating & GitHub Actions Cron Alignment
@@ -188,8 +188,9 @@ Edit `.env`:
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-3.6-flash
 
-# Fallback LLM: Groq Llama-3.3-70B
+# Fallback LLM: Groq Llama-3.1-8B
 GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=llama-3.1-8b-instant
 
 # Cloud Database: Turso (LibSQL)
 TURSO_DATABASE_URL=libsql://your-database-name.turso.io

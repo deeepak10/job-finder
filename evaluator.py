@@ -256,7 +256,7 @@ async def evaluate_job_groq(
     job_dict: dict[str, Any],
     groq_client: Any,
 ) -> Optional[JobEvaluation]:
-    """Evaluate a single job posting asynchronously using Groq Llama-3.3-70B with 6s pacing.
+    """Evaluate a single job posting asynchronously using Groq Llama-3.1-8B with 6s pacing.
 
     Serves as the secondary stage in the multi-provider waterfall, taking over when
     Gemini hits its 20 daily free requests limit. Strictly enforces a 6-second sleep
@@ -274,12 +274,13 @@ async def evaluate_job_groq(
     """
     prompt = build_job_prompt(job_dict)
 
-    log.info("Evaluating with Groq (Llama-3.3-70B): '%s'", job_dict.get("title", ""))
+    log.info("Evaluating with Groq (Llama-3.1-8b-instant): '%s'", job_dict.get("title", ""))
 
     # Enforce 6-second pacing to stay under 12,000 TPM limit
     await asyncio.sleep(6)
 
     try:
+        model_name = getattr(config, "GROQ_MODEL", "llama-3.1-8b-instant") or "llama-3.1-8b-instant"
         response = await groq_client.chat.completions.create(
             messages=[
                 {
@@ -295,7 +296,7 @@ async def evaluate_job_groq(
                     "content": prompt,
                 },
             ],
-            model="llama-3.3-70b-versatile",
+            model=model_name,
             response_format={"type": "json_object"},
             temperature=0.1,
         )

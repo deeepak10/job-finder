@@ -437,7 +437,7 @@ def test_evaluate_job_groq_success_and_pacing(monkeypatch):
 
     # Verify model and response_format
     call_kwargs = mock_groq.chat.completions.create.call_args.kwargs
-    assert call_kwargs["model"] == "llama-3.3-70b-versatile"
+    assert call_kwargs["model"] == "llama-3.1-8b-instant"
     assert call_kwargs["response_format"] == {"type": "json_object"}
     assert call_kwargs["temperature"] == 0.1
 
@@ -477,7 +477,7 @@ def test_evaluate_job_groq_raises_on_429(monkeypatch):
 
     mock_groq = MagicMock()
     mock_groq.chat.completions.create = AsyncMock(
-        side_effect=Exception("Error 429: Rate limit reached for llama-3.3-70b-versatile")
+        side_effect=Exception("Error 429: Rate limit reached for llama-3.1-8b-instant")
     )
 
     job_data = {"title": "Firmware Engineer", "company": "Medtronic"}

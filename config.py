@@ -36,8 +36,9 @@ GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL: str = "gemini-3.6-flash"
 GEMINI_TIMEOUT_SECONDS: float = 45.0
 
-# Groq Fallback LLM Evaluation (Llama-3.3-70B)
+# Groq Fallback LLM Evaluation (Llama-3.1-8b-instant)
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant").strip()
 
 # Priority Healthcare Companies (triggers Purple alert color: 986895)
 TARGET_HEALTHCARE_COMPANIES: list[str] = [
