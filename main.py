@@ -47,6 +47,7 @@ from database import (
     title_company_hash,
     update_job_status,
 )
+from discord_alerts import send_discord_alert_async
 from evaluator import (
     GeminiQuotaExceededError,
     GroqQuotaExceededError,

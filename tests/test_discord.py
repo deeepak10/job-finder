@@ -87,3 +87,9 @@ def test_alert_gating_is_match_true(sample_job, sample_evaluation):
         assert sent is True
         mock_post.assert_called_once()
 
+
+def test_main_imports_send_discord_alert_async():
+    import main
+    assert hasattr(main, "send_discord_alert_async")
+    assert callable(main.send_discord_alert_async)
+
