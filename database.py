@@ -1,0 +1,487 @@
+"""
+Turso Cloud Database layer for the Unified Autonomous AI Job Pipeline.
+
+Handles:
+  * Asynchronous connection management via AsyncTursoConnection (turso-python)
+  * Schema creation (idempotent)
+  * Deterministic job_id and title+company hashing
+  * Layer 0 (O(1) Deduplication) querying Turso for URL or hash(title + company)
+  * Async persistence of evaluated job postings and alert statuses
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from turso_python import AsyncTursoConnection
+from turso_python.response_parser import TursoResponseParser
+
+import config
+
+log = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------
+# Schema Specification (v2)
+# --------------------------------------------------------------------------
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS job_postings (
+    job_id              TEXT PRIMARY KEY,
+    title               TEXT    NOT NULL,
+    company             TEXT    NOT NULL,
+    location            TEXT,
+    platform            TEXT    NOT NULL,
+    url                 TEXT    NOT NULL,
+    ai_score            INTEGER,
+    visa_sponsorship    TEXT,
+    date_found          TEXT,
+    alert_sent          INTEGER DEFAULT 0
+);
+"""
+
+INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_jobs_url ON job_postings (url);",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_date_found ON job_postings (date_found DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_score ON job_postings (ai_score DESC);",
+]
+
+
+# --------------------------------------------------------------------------
+# Connection Management
+# --------------------------------------------------------------------------
+
+def get_turso_client(
+    database_url: Optional[str] = None,
+    auth_token: Optional[str] = None,
+    timeout: int = 30,
+) -> AsyncTursoConnection:
+    """Create an AsyncTursoConnection instance using configuration or environment.
+
+    Args:
+        database_url: Optional explicit LibSQL database URL. If omitted, falls back
+            to config.TURSO_DATABASE_URL or the TURSO_DATABASE_URL environment variable.
+        auth_token: Optional explicit authentication token. If omitted, falls back
+            to config.TURSO_AUTH_TOKEN or the TURSO_AUTH_TOKEN environment variable.
+        timeout: HTTP request timeout in seconds (default: 30).
+
+    Returns:
+        An initialized AsyncTursoConnection instance configured with automatic retries.
+
+    Raises:
+        ValueError: If TURSO_DATABASE_URL is not provided or configured in the environment.
+    """
+    url = database_url or config.TURSO_DATABASE_URL or os.getenv("TURSO_DATABASE_URL")
+    token = auth_token or config.TURSO_AUTH_TOKEN or os.getenv("TURSO_AUTH_TOKEN")
+
+    if not url:
+        raise ValueError("TURSO_DATABASE_URL must be provided or configured in .env")
+
+    return AsyncTursoConnection(
+        database_url=url,
+        auth_token=token,
+        timeout=timeout,
+        retries=2,
+    )
+
+
+def parse_turso_rows(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert a raw Turso JSON query response into a list of typed dictionary rows.
+
+    Args:
+        response: Raw JSON response dictionary returned by AsyncTursoConnection.execute_query.
+
+    Returns:
+        List of dictionaries where each item maps column names to deserialized values.
+    """
+    normalized = TursoResponseParser.normalize_response(response)
+    columns = normalized.get("columns", [])
+    raw_rows = normalized.get("rows", [])
+    result: list[dict[str, Any]] = []
+    for row in raw_rows:
+        row_dict: dict[str, Any] = {}
+        for col, cell in zip(columns, row):
+            if isinstance(cell, dict):
+                if cell.get("type") == "null":
+                    row_dict[col] = None
+                elif "value" in cell:
+                    row_dict[col] = cell["value"]
+                else:
+                    row_dict[col] = None
+            else:
+                row_dict[col] = cell
+        result.append(row_dict)
+    return result
+
+
+# --------------------------------------------------------------------------
+# Schema Initialization
+# --------------------------------------------------------------------------
+
+async def init_db(client: Optional[AsyncTursoConnection] = None) -> None:
+    """Initialize the Turso database schema and secondary indexes idempotently.
+
+    Creates the `job_postings` table and performance indexes (`idx_jobs_url`,
+    `idx_jobs_date_found`, `idx_jobs_score`) if they do not exist. Cleans up
+    legacy columns from prior schema iterations.
+
+    Args:
+        client: Optional shared AsyncTursoConnection. If omitted, a scoped client is
+            created and automatically closed upon completion.
+    """
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        log.info("Initializing Turso database schema...")
+        await client.execute_query(SCHEMA)
+        for idx_sql in INDEXES:
+            await client.execute_query(idx_sql)
+
+        # Drop legacy columns if present in existing table
+        for legacy_col in ("ai_reasoning", "portfolio_highlight", "outreach_message"):
+            try:
+                await client.execute_query(f"ALTER TABLE job_postings DROP COLUMN {legacy_col};")
+                log.info("Dropped legacy column '%s' from job_postings.", legacy_col)
+            except Exception:
+                pass
+
+        log.info("Turso database initialized successfully.")
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
+# --------------------------------------------------------------------------
+# Hashing & Job Identity
+# --------------------------------------------------------------------------
+
+_WHITESPACE = re.compile(r"\s+")
+_TRACKING_PARAMS = ("?", "#")
+
+
+def _normalize(value: str) -> str:
+    return _WHITESPACE.sub(" ", (value or "").strip().lower())
+
+
+def _strip_url(url: str) -> str:
+    """Drop query parameters and trailing fragments to canonicalize."""
+    clean = (url or "").strip()
+    for marker in _TRACKING_PARAMS:
+        clean = clean.split(marker, 1)[0]
+    return clean.rstrip("/").lower()
+
+
+def title_company_hash(title: str, company: str) -> str:
+    """Deterministic hash of (title + company) used for Layer 0 dedup."""
+    raw = f"{_normalize(title)}|{_normalize(company)}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def make_job_id(platform: str, url: str = "", title: str = "", company: str = "") -> str:
+    """Deterministic 16-character job ID.
+
+    Prefers hash(title + company) combined with platform/url to avoid duplicates.
+    """
+    clean_u = _strip_url(url)
+    tc_hash = title_company_hash(title, company)
+    if clean_u:
+        raw = f"{_normalize(platform)}|{clean_u}|{tc_hash}"
+    else:
+        raw = f"{_normalize(platform)}|{tc_hash}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+# --------------------------------------------------------------------------
+# Layer 0 (O(1) Deduplication)
+# --------------------------------------------------------------------------
+
+async def is_job_seen(
+    url_or_id: str = "",
+    title: str = "",
+    company: str = "",
+    client: Optional[AsyncTursoConnection] = None,
+) -> bool:
+    """Execute Layer 0 O(1) deduplication check against Turso Cloud.
+
+    Queries the primary key (`job_id`) and indexed `url` column to determine
+    if a candidate job has already been evaluated or stored in prior runs.
+
+    Args:
+        url_or_id: Job posting URL or pre-computed unique identifier.
+        title: Job posting title (used with company to derive hash).
+        company: Hiring organization name.
+        client: Optional shared AsyncTursoConnection instance.
+
+    Returns:
+        True if the job exists in the database; False if fresh or on query error (fail-open).
+    """
+    clean_url = _strip_url(url_or_id) if url_or_id.startswith("http") else ""
+    tc_hash = title_company_hash(title, company) if (title and company) else ""
+    target_id = url_or_id if not clean_url else tc_hash
+
+    # Look up by primary key or indexed URL
+    query = "SELECT 1 FROM job_postings WHERE url = ? OR job_id = ? OR job_id = ? LIMIT 1"
+    args = [clean_url or url_or_id, target_id or url_or_id, tc_hash or url_or_id]
+
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        res = await client.execute_query(query, args)
+        rows = TursoResponseParser.extract_rows(res)
+        return len(rows) > 0
+    except Exception as exc:
+        log.warning("Turso deduplication check error (%s); failing open: %s", url_or_id, exc)
+        return False
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
+async def is_new_job_async(
+    url_or_id: str = "",
+    title: str = "",
+    company: str = "",
+    client: Optional[AsyncTursoConnection] = None,
+) -> bool:
+    """Async inverse of is_job_seen: True if the job is fresh and should be processed."""
+    seen = await is_job_seen(url_or_id=url_or_id, title=title, company=company, client=client)
+    return not seen
+
+
+def is_new_job(url_or_id: str = "", title: str = "", company: str = "") -> bool:
+    """Synchronous interface matching scrapers/base.py signature."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, is_new_job_async(url_or_id, title, company)).result()
+    else:
+        return asyncio.run(is_new_job_async(url_or_id, title, company))
+
+
+is_new_job_sync = is_new_job
+
+
+
+# --------------------------------------------------------------------------
+# Insert & Update Operations
+# --------------------------------------------------------------------------
+
+async def add_job(
+    job: dict[str, Any],
+    client: Optional[AsyncTursoConnection] = None,
+) -> bool:
+    """Persist an evaluated job posting record into Turso Cloud SQLite.
+
+    Inserts or updates the job posting with its metadata, AI match score,
+    visa sponsorship status, and alert state.
+
+    Args:
+        job: Dictionary containing job fields: title, company, platform, url,
+            and optional location, ai_score, visa_sponsorship, date_found.
+        client: Optional shared AsyncTursoConnection instance.
+
+    Returns:
+        True if the record was inserted/updated successfully, False otherwise.
+
+    Raises:
+        ValueError: If any mandatory field (title, company, platform, url) is missing.
+    """
+    required = ("title", "company", "platform", "url")
+    missing = [k for k in required if not job.get(k)]
+    if missing:
+        raise ValueError(f"Job is missing required field(s): {', '.join(missing)}")
+
+    title = job["title"].strip()
+    company = job["company"].strip()
+    url = job["url"].strip()
+    platform = job["platform"].strip().lower()
+    location = (job.get("location") or "").strip()
+
+    # Determine job_id: prefer hash(title + company) as primary identity
+    job_id = job.get("job_id") or title_company_hash(title, company)
+    ai_score = job.get("ai_score")
+    visa_sponsorship = job.get("visa_sponsorship") or ""
+    date_found = job.get("date_found") or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    alert_sent = int(bool(job.get("alert_sent", 0)))
+
+    sql = """
+    INSERT OR REPLACE INTO job_postings (
+        job_id, title, company, location, platform, url,
+        ai_score, visa_sponsorship, date_found, alert_sent
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    args = [
+        job_id,
+        title,
+        company,
+        location,
+        platform,
+        url,
+        ai_score,
+        visa_sponsorship,
+        date_found,
+        alert_sent,
+    ]
+
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        res = await client.execute_query(sql, args)
+        # Check affected row count
+        if res.get("results") and res["results"][0].get("response"):
+            result_meta = res["results"][0]["response"].get("result", {})
+            return result_meta.get("affected_row_count", 0) > 0
+        return True
+    except Exception as exc:
+        log.error("Failed to insert job '%s' at %s into Turso: %s", title, company, exc)
+        return False
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
+async def mark_alert_sent(
+    job_id: str,
+    client: Optional[AsyncTursoConnection] = None,
+) -> None:
+    """Mark a job record as alerted after Discord notification succeeds.
+
+    Args:
+        job_id: The unique primary key of the job posting.
+        client: Optional shared AsyncTursoConnection instance.
+    """
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        await client.execute_query(
+            "UPDATE job_postings SET alert_sent = 1 WHERE job_id = ?",
+            [job_id],
+        )
+    except Exception as exc:
+        log.warning("Failed to update alert_sent for %s: %s", job_id, exc)
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
+async def get_job(
+    job_id: str,
+    client: Optional[AsyncTursoConnection] = None,
+) -> Optional[dict[str, Any]]:
+    """Retrieve a single job posting record from Turso Cloud by its job_id.
+
+    Args:
+        job_id: The unique 16-character identifier of the job posting.
+        client: Optional shared AsyncTursoConnection instance.
+
+    Returns:
+        Job record dictionary if found, or None if no record matches.
+    """
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        res = await client.execute_query(
+            "SELECT * FROM job_postings WHERE job_id = ? LIMIT 1",
+            [job_id],
+        )
+        parsed = parse_turso_rows(res)
+        return parsed[0] if parsed else None
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
+async def get_stats(client: Optional[AsyncTursoConnection] = None) -> dict[str, Any]:
+    """Retrieve comprehensive aggregation metrics from Turso Cloud Database.
+
+    Args:
+        client: Optional shared AsyncTursoConnection instance.
+
+    Returns:
+        Dictionary containing total jobs, high matches, alerts dispatched, and platform breakdown.
+    """
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        total_res = await client.execute_query("SELECT COUNT(*) AS total FROM job_postings")
+        total_rows = parse_turso_rows(total_res)
+        total = int(total_rows[0]["total"]) if total_rows else 0
+
+        platform_res = await client.execute_query(
+            "SELECT platform, COUNT(*) AS n FROM job_postings GROUP BY platform"
+        )
+        by_platform = {
+            r["platform"]: int(r["n"]) for r in parse_turso_rows(platform_res) if r.get("platform")
+        }
+
+        high_score_res = await client.execute_query(
+            "SELECT COUNT(*) AS high_scores FROM job_postings WHERE ai_score >= 70"
+        )
+        high_score_rows = parse_turso_rows(high_score_res)
+        high_scores = int(high_score_rows[0]["high_scores"]) if high_score_rows else 0
+
+        alerted_res = await client.execute_query(
+            "SELECT COUNT(*) AS alerted FROM job_postings WHERE alert_sent = 1"
+        )
+        alerted_rows = parse_turso_rows(alerted_res)
+        alerted = int(alerted_rows[0]["alerted"]) if alerted_rows else 0
+
+        return {
+            "total_jobs": total,
+            "high_match_jobs (>=70)": high_scores,
+            "alerts_dispatched": alerted,
+            "by_platform": by_platform,
+        }
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import json
+    import sys
+
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "init"
+
+    if cmd == "init":
+        asyncio.run(init_db())
+        print("Initialized Turso Database schema and indexes successfully.")
+    elif cmd == "stats":
+        s = asyncio.run(get_stats())
+        print(json.dumps(s, indent=2))
+    else:
+        print("Usage: python database.py [init|stats]")
+        sys.exit(1)
