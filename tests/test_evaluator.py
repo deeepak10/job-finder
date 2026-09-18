@@ -30,9 +30,33 @@ def test_system_prompt_contains_required_sections():
     assert "Medical Device R&D" in SYSTEM_INSTRUCTION
     assert "Biomedical Firmware" in SYSTEM_INSTRUCTION
     assert "visa_sponsorship" in SYSTEM_INSTRUCTION
+    assert "match_reason" in SYSTEM_INSTRUCTION
     assert "telemetry" not in SYSTEM_INSTRUCTION.lower()
     # Outreach draft instruction removed to conserve LLM generation tokens
     assert "linkedin_outreach_message" not in SYSTEM_INSTRUCTION
+
+
+def test_parse_ai_json_handling():
+    from evaluator import parse_ai_json
+
+    # 1. Plain valid JSON
+    res1 = parse_ai_json('{"is_match": true, "ai_score": 85, "match_reason": "Direct firmware match"}')
+    assert res1["is_match"] is True
+    assert res1["match_reason"] == "Direct firmware match"
+
+    # 2. Markdown wrapped JSON
+    res2 = parse_ai_json('```json\n{"is_match": false, "ai_score": 10, "match_reason": "Sales role"}\n```')
+    assert res2["is_match"] is False
+    assert res2["match_reason"] == "Sales role"
+
+    # 3. Conversational preamble and postscript
+    res3 = parse_ai_json('Sure! Here is the evaluation:\n{"is_match": true, "ai_score": 90, "match_reason": "Healthtech"} \nHope this helps!')
+    assert res3["is_match"] is True
+    assert res3["ai_score"] == 90
+
+    # 4. Invalid or empty
+    assert parse_ai_json("") == {}
+    assert parse_ai_json("no json here") == {}
 
 
 def test_evaluate_job_timeout_fails_gracefully(monkeypatch):

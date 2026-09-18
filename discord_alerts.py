@@ -62,6 +62,12 @@ def build_discord_embed(
     platform = _safe_str((job.get("platform") or "Web").capitalize(), max_len=50, fallback="Web")
     color = pick_embed_color(company)
 
+    match_reason = (
+        getattr(evaluation, "match_reason", "")
+        or job.get("match_reason")
+        or "Passed semantic evaluation."
+    )
+
     fields = [
         {"name": "🏢 Company", "value": company, "inline": True},
         {"name": "📍 Location", "value": location, "inline": True},
@@ -71,6 +77,11 @@ def build_discord_embed(
             "value": _safe_str(evaluation.visa_sponsorship, max_len=200, fallback="Not Specified"),
             "inline": True,
         },
+        {
+            "name": "Why it matched:",
+            "value": _safe_str(match_reason, max_len=1000, fallback="Passed semantic evaluation."),
+            "inline": False,
+        },
     ]
 
     embed = {
@@ -78,6 +89,9 @@ def build_discord_embed(
         "url": url,
         "color": color,
         "fields": fields,
+        "footer": {
+            "text": "Tri-Model AI Routing Pipeline",
+        },
     }
 
     return embed

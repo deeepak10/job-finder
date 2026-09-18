@@ -61,12 +61,14 @@ def test_embed_structure(sample_job, sample_evaluation):
     assert "📍 Location" in field_dict and field_dict["📍 Location"]["inline"] is True
     assert "🌐 Platform" in field_dict and field_dict["🌐 Platform"]["inline"] is True
     assert "🛂 Visa Status" in field_dict and field_dict["🛂 Visa Status"]["inline"] is True
-    assert "🧠 AI Reasoning" not in field_dict
+    # Context field for why role was matched
+    assert "Why it matched:" in field_dict and field_dict["Why it matched:"]["inline"] is False
+    assert embed.get("footer", {}).get("text") == "Tri-Model AI Routing Pipeline"
 
     # Removed fields to eliminate clutter and token consumption
     assert "🔥 AI Match Score" not in field_dict
     assert "✉️ Outreach Draft" not in field_dict
-    assert "footer" not in embed or "💡 Tip" not in embed.get("footer", {}).get("text", "")
+    assert "💡 Tip" not in embed.get("footer", {}).get("text", "")
 
 
 def test_alert_gating_is_match_false(sample_job, sample_evaluation):

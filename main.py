@@ -311,6 +311,8 @@ async def process_job(
         "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "alert_sent": 0,
         "status": status_val,
+        "tier": "strict",
+        "match_reason": getattr(evaluation, "match_reason", "") or "",
     }
 
     if dry_run:
@@ -609,6 +611,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             status=new_status,
                             ai_score=score,
                             visa_sponsorship=eval_res.visa_sponsorship,
+                            match_reason=eval_res.match_reason,
                         )
                         alert_sent = False
                         if is_match and score >= 70:
@@ -652,16 +655,19 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                         if groq_res.get("is_match") is True:
                             # Consensus reached! Both OpenRouter and Groq accept.
                             score = groq_res.get("ai_score") or 75
+                            reason = groq_res.get("match_reason") or "Consensus confirmed by Groq"
                             await update_job_status(
                                 job_id=p_id,
                                 status="active",
                                 ai_score=score,
                                 visa_sponsorship=groq_res.get("visa_sponsorship"),
+                                match_reason=reason,
                             )
                             eval_obj = JobEvaluation(
                                 is_match=True,
                                 visa_sponsorship=groq_res.get("visa_sponsorship") or "Not Specified",
                                 ai_score=score,
+                                match_reason=reason,
                                 status="active",
                             )
                             alert_sent = False
@@ -679,11 +685,13 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                         else:
                             # Conflict reached: OpenRouter accepted previously, but Groq rejected.
                             # Park for next-day Gemini sweep
+                            reason = groq_res.get("match_reason") or "Groq rejected upon verification"
                             await update_job_status(
                                 job_id=p_id,
                                 status="deferred",
                                 ai_score=0,
                                 visa_sponsorship="Conflict",
+                                match_reason=reason,
                             )
                             await metrics.inc_evaluated(
                                 is_high_match=False,
@@ -748,6 +756,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                         "alert_sent": 0,
                         "status": status_val,
                         "tier": "strict",
+                        "match_reason": getattr(evaluation, "match_reason", "") or "",
                     }
                     alert_delivered = False
                     if not args.dry_run:
@@ -785,6 +794,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "consensus_passed",
                             "tier": "strict",
+                            "match_reason": getattr(consensus_eval, "match_reason", "") or "Consensus passed",
                         }
                         alert_delivered = False
                         if not args.dry_run:
@@ -811,6 +821,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "rejected",
                             "tier": "strict",
+                            "match_reason": getattr(consensus_eval, "match_reason", "") or "Consensus rejected",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -833,6 +844,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "deferred",
                             "tier": "strict",
+                            "match_reason": "Junior consensus conflict",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -879,6 +891,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "rejected",
                             "tier": "broad",
+                            "match_reason": groq_res.get("match_reason") or "Groq gatekeeper rejected",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -899,11 +912,13 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                         # Both accept -> Consensus met. status = 'active', send Discord alert
                         avg_score = int(((groq_res.get("ai_score") or 75) + (or_res.get("ai_score") or 75)) / 2)
                         log.info("Route B: Both models approved '%s' @ %s (Score: %d)", job.title, job.company, avg_score)
+                        reason = groq_res.get("match_reason") or or_res.get("match_reason") or "Ensemble consensus approved"
                         eval_obj = JobEvaluation(
                             is_match=True,
                             visa_sponsorship=groq_res.get("visa_sponsorship") or or_res.get("visa_sponsorship") or "Not Specified",
                             ai_score=avg_score,
                             status="active",
+                            match_reason=reason,
                         )
                         rec = {
                             "job_id": job_id,
@@ -919,6 +934,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "active",
                             "tier": "broad",
+                            "match_reason": reason,
                         }
                         alert_delivered = False
                         if not args.dry_run:
@@ -947,6 +963,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "deferred",
                             "tier": "broad",
+                            "match_reason": "Split decision between Groq and OpenRouter",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -982,6 +999,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "rejected",
                             "tier": "broad",
+                            "match_reason": or_res.get("match_reason") or "Solo OpenRouter rejected",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -1008,6 +1026,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "pending_groq_verification",
                             "tier": "broad",
+                            "match_reason": or_res.get("match_reason") or "Pending Groq verification",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -1031,6 +1050,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "deferred",
                             "tier": "broad",
+                            "match_reason": "Both models failed or error",
                         }
                         if not args.dry_run:
                             await add_job(rec)

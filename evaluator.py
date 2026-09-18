@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Optional
 
 from google import genai
@@ -60,6 +61,10 @@ class JobEvaluation(BaseModel):
         default=None,
         description="Calculated match score between 0 and 100",
     )
+    match_reason: str = Field(
+        default="",
+        description="1-sentence explanation of why this job matches the core priorities or why it was rejected",
+    )
     status: str = Field(
         default="active",
         description="Evaluation status: active, consensus_passed, or deferred",
@@ -67,7 +72,7 @@ class JobEvaluation(BaseModel):
 
     @property
     def reasoning(self) -> str:
-        return ""
+        return self.match_reason
 
     @property
     def match_score(self) -> Optional[int]:
@@ -83,18 +88,39 @@ class JobEvaluation(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# Resilient JSON Parser
+# --------------------------------------------------------------------------
+
+def parse_ai_json(raw_text: str) -> dict[str, Any]:
+    """Extracts valid JSON dynamically, ignoring markdown blocks or trailing text."""
+    if not raw_text:
+        return {}
+    cleaned = raw_text.strip()
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        return {}
+
+
+# --------------------------------------------------------------------------
 # B. System Prompt (Context-Dense Semantic Matching)
 # --------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """You are an elite technical recruiter evaluating engineering roles for a candidate with a strong background in Biomedical Engineering, Electronics, IoT, and Python Data Analytics.
 
-YOUR GOAL: Output ONLY a JSON object with keys: is_match (bool), visa_sponsorship (str), ai_score (int).
+YOUR GOAL: Output ONLY a JSON object with keys: is_match (bool), visa_sponsorship (str), ai_score (int), and match_reason (str).
 
 1. CORE PRIORITIES (High ai_score): 
    Vigorously target roles involving Medical Device R&D, Biomedical Firmware, Medical IoT, Python Healthtech, and Signal Processing (including ECG analysis, computer vision/MediaPipe, or embedded DSP).
 
 2. BROAD SEMANTIC MATCHING (Analyze Context): 
-   Do not reject a job just because the title is generic (e.g., "Software Engineer", "Embedded Developer", "R&D Engineer", "Data Analyst"). Read the description. If the company is in healthcare/MedTech, or if the role involves IoT hardware integration, C/C++, full-stack Python development, or hardware-software interfacing, mark is_match=True.
+   Do not reject a job just because the title is generic. Read the description. If the company is in healthcare/MedTech, or if the role involves IoT hardware integration, C/C++, full-stack Python development, or hardware-software interfacing, mark is_match=True.
 
 3. STRICT REJECTIONS (is_match=False): 
    Instantly reject ANY role related to:
@@ -102,6 +128,8 @@ YOUR GOAL: Output ONLY a JSON object with keys: is_match (bool), visa_sponsorshi
    - Field Service, Hardware Maintenance, or Repair Technicians.
    - Medical Billing, Pharmacists, Receptionists, or Clerical hospital staff.
    - IT Helpdesk, Customer Support, or BPO voice processes.
+
+4. MATCH REASON: Provide a 1-sentence explanation of why this job matches the core priorities or why it was rejected.
 """
 
 SYSTEM_INSTRUCTION = SYSTEM_PROMPT
@@ -486,39 +514,45 @@ openrouter_client = AsyncOpenAI(
 
 
 async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Optional[dict[str, Any]]:
-    """Helper function to query an OpenAI-compatible endpoint safely and parse JSON response."""
-    try:
-        response = await client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        f"{SYSTEM_INSTRUCTION}\n\n"
-                        "You are a strict technical recruiter evaluating biomedical and firmware roles. "
-                        "Output ONLY a valid JSON object containing keys: is_match (bool), visa_sponsorship (str), ai_score (int)."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            model=model_name,
-            response_format={"type": "json_object"},
-            temperature=0.1,
-        )
-        if not response or not response.choices:
+    """Helper function to query an OpenAI-compatible endpoint safely and parse JSON response.
+
+    Features exponential backoff retry on HTTP 429 rate limit exceptions (up to 4 attempts)
+    and resilient regex-based JSON extraction.
+    """
+    max_attempts = 4
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = await client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"{SYSTEM_INSTRUCTION}\n\n"
+                            "You are a strict technical recruiter evaluating biomedical and firmware roles. "
+                            "Output ONLY a valid JSON object containing keys: is_match (bool), visa_sponsorship (str), ai_score (int), and match_reason (str)."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                model=model_name,
+                response_format={"type": "json_object"},
+                temperature=0.1,
+            )
+            if not response or not response.choices:
+                return None
+            content = response.choices[0].message.content or ""
+            return parse_ai_json(content)
+        except Exception as e:
+            exc_str = str(e)
+            code = getattr(e, "status_code", getattr(e, "code", None))
+            is_rate_limit = code == 429 or "429" in exc_str or "rate_limit" in exc_str.lower()
+            if is_rate_limit and attempt < max_attempts:
+                backoff = min(10.0, 1.5 ** attempt + 2.0)
+                log.warning("Rate limit (429) hit on %s. Retrying in %.2fs (attempt %d/%d)...", model_name, backoff, attempt, max_attempts)
+                await asyncio.sleep(backoff)
+                continue
+            log.error("Error querying model %s: %s", model_name, e)
             return None
-        content = response.choices[0].message.content or ""
-        raw_text = content.strip()
-        if raw_text.startswith("```"):
-            lines = raw_text.splitlines()
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            raw_text = "\n".join(lines).strip()
-        return json.loads(raw_text)
-    except Exception as e:
-        log.error("Error querying model %s: %s", model_name, e)
-        return None
 
 
 async def evaluate_with_consensus(
@@ -538,10 +572,10 @@ async def evaluate_with_consensus(
     # If keys are missing from runtime environment, defer immediately
     if not getattr(config, "GROQ_API_KEY", ""):
         log.warning("GROQ_API_KEY is not configured. Deferring job evaluation.")
-        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "status": "deferred"}
+        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Missing GROQ_API_KEY", "status": "deferred"}
     if not getattr(config, "OPENROUTER_API_KEY", ""):
         log.warning("OPENROUTER_API_KEY is not configured. Deferring job evaluation.")
-        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "status": "deferred"}
+        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Missing OPENROUTER_API_KEY", "status": "deferred"}
 
     groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
     router_model = getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat")
@@ -557,7 +591,7 @@ async def evaluate_with_consensus(
     # If both models failed to respond correctly
     if not groq_res or not openrouter_res:
         log.warning("One or more ensemble models failed. Deferring job evaluation.")
-        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "status": "deferred"}
+        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Ensemble model failure", "status": "deferred"}
 
     groq_match = bool(groq_res.get("is_match", False))
     router_match = bool(openrouter_res.get("is_match", False))
@@ -571,6 +605,7 @@ async def evaluate_with_consensus(
             "is_match": True,
             "visa_sponsorship": groq_res.get("visa_sponsorship") or openrouter_res.get("visa_sponsorship") or "Not Specified",
             "ai_score": int(avg_score),
+            "match_reason": groq_res.get("match_reason") or openrouter_res.get("match_reason") or "Consensus reached across models.",
             "status": "consensus_passed",
         }
 
@@ -581,12 +616,19 @@ async def evaluate_with_consensus(
             "is_match": False,
             "visa_sponsorship": "Rejected",
             "ai_score": 0,
+            "match_reason": groq_res.get("match_reason") or openrouter_res.get("match_reason") or "Both models rejected role.",
             "status": "consensus_failed",
         }
 
     # 3. Split Decision -> Conflict (parked for Gemini executive tie-breaker)
     log.info("Consensus conflict: Groq match=%s, OpenRouter match=%s. Deferring as conflict.", groq_match, router_match)
-    return {"is_match": False, "visa_sponsorship": "Conflict", "ai_score": 0, "status": "conflict"}
+    return {
+        "is_match": False,
+        "visa_sponsorship": "Conflict",
+        "ai_score": 0,
+        "match_reason": "Split decision between Groq and OpenRouter.",
+        "status": "conflict",
+    }
 
 
 async def evaluate_job_consensus(
@@ -601,5 +643,6 @@ async def evaluate_job_consensus(
         is_match=res_dict.get("is_match", False),
         visa_sponsorship=res_dict.get("visa_sponsorship", "Unknown"),
         ai_score=res_dict.get("ai_score"),
+        match_reason=res_dict.get("match_reason", ""),
         status=res_dict.get("status", "deferred"),
     )

@@ -217,3 +217,98 @@ def test_target_urls_and_spam_keywords_configured():
     for kw in expected_spam:
         assert kw in SPAM_KEYWORDS
 
+
+def test_update_job_status_persists_match_reason():
+    """Verify update_job_status properly includes match_reason in SQL and args."""
+    from database import update_job_status
+
+    mock_client = MagicMock()
+    mock_client.execute_query = AsyncMock(return_value={"rows_affected": 1})
+    mock_client.session = None
+
+    reason_text = "Strong embedded C++ and biomedical device diagnostics."
+    ok = asyncio.run(
+        update_job_status(
+            "job-456",
+            status="active",
+            ai_score=92,
+            visa_sponsorship="Available",
+            match_reason=reason_text,
+            client=mock_client,
+        )
+    )
+    assert ok is True
+    sql, args = mock_client.execute_query.call_args[0]
+    assert "match_reason = ?" in sql
+    assert reason_text in args
+    assert "active" in args
+    assert 92 in args
+
+
+def test_query_model_exponential_backoff_on_429(monkeypatch):
+    """Verify query_model retries with exponential backoff on HTTP 429 rate limit."""
+    from evaluator import query_model
+
+    sleep_calls = []
+
+    async def mock_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+
+    mock_client = MagicMock()
+    call_count = 0
+
+    async def mock_create(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            err = Exception("Error code: 429 - {'error': {'message': 'Rate limit reached'}}")
+            setattr(err, "status_code", 429)
+            raise err
+        # Success on attempt 3
+        mock_choice = MagicMock()
+        mock_choice.message.content = '```json\n{"is_match": true, "ai_score": 85, "visa_sponsorship": "Yes", "match_reason": "Relevant IoT firmware background"}\n```'
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        return mock_resp
+
+    mock_client.chat.completions.create = mock_create
+
+    result = asyncio.run(query_model(mock_client, "test-model", "test prompt"))
+    assert result is not None
+    assert result["is_match"] is True
+    assert result["ai_score"] == 85
+    assert result["match_reason"] == "Relevant IoT firmware background"
+    assert call_count == 3
+    assert len(sleep_calls) == 2  # Slept twice before 3rd successful attempt
+    assert sleep_calls[0] > 0
+    assert sleep_calls[1] > sleep_calls[0]
+
+
+def test_parse_ai_json_extraction_edge_cases():
+    """Verify parse_ai_json safely handles markdown codeblocks and conversational preamble."""
+    from evaluator import parse_ai_json
+
+    # Test 1: Markdown backticks with preamble and postamble
+    dirty_text = (
+        "Here is the evaluation for the position:\n"
+        "```json\n"
+        "{\n"
+        '  "is_match": true,\n'
+        '  "visa_sponsorship": "Eligible",\n'
+        '  "ai_score": 88,\n'
+        '  "match_reason": "Deep C/C++ firmware and medical instrumentation experience."\n'
+        "}\n"
+        "```\n"
+        "Let me know if you need further details!"
+    )
+    res = parse_ai_json(dirty_text)
+    assert res is not None
+    assert res["is_match"] is True
+    assert res["ai_score"] == 88
+    assert "biomedical" in res["match_reason"].lower() or "c/c++" in res["match_reason"].lower()
+
+    # Test 2: Invalid text returns empty dict
+    assert parse_ai_json("Just plain text with no json") == {}
+
