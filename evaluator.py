@@ -252,15 +252,91 @@ def build_job_prompt(job_dict: dict[str, Any]) -> str:
     )
 
 
+# Prioritized list of fallback models to attempt in order
+GROQ_FALLBACK_MODELS: list[str] = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+]
+
+
+async def evaluate_job_with_model_rotation(prompt: str, groq_client: Any) -> Any:
+    """Attempt to evaluate a job description using Groq models in prioritized order.
+
+    Automatically rotates to the next model if a 404 model_not_found error is thrown.
+    Raises non-404 errors (such as 429 rate limit or authentication errors) immediately.
+
+    Args:
+        prompt: Formatted and token-optimized prompt string.
+        groq_client: Initialized AsyncGroq client instance.
+
+    Returns:
+        Groq chat completion response object.
+
+    Raises:
+        GroqQuotaExceededError: If Groq returns HTTP 429 or rate limit exhaustion.
+        Exception: If all fallback models fail or if a non-404 exception occurs.
+    """
+    last_exception = None
+
+    for model_name in GROQ_FALLBACK_MODELS:
+        try:
+            log.info("Attempting Groq evaluation using model: %s", model_name)
+            response = await groq_client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"{SYSTEM_INSTRUCTION}\n\n"
+                            "You are a strict technical recruiter evaluating biomedical engineering and firmware roles. "
+                            "Output ONLY valid JSON matching schema: "
+                            "{\"is_match\": boolean, \"visa_sponsorship\": string}."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                model=model_name,
+                response_format={"type": "json_object"},
+                temperature=0.1,
+            )
+            return response
+        except Exception as e:
+            error_str = str(e)
+            code = getattr(e, "status_code", getattr(e, "code", None))
+            if code == 404 or "404" in error_str or "model_not_found" in error_str:
+                log.warning(
+                    "Model '%s' returned 404/not found. Rotating to next available model...",
+                    model_name,
+                )
+                last_exception = e
+                continue
+            elif (
+                code == 429
+                or "429" in error_str
+                or "RESOURCE_EXHAUSTED" in error_str
+                or "rate_limit" in error_str.lower()
+            ):
+                log.warning("Groq API rate limit or quota exceeded (429) on model '%s': %s", model_name, e)
+                raise GroqQuotaExceededError(f"Groq API limit reached: {e}") from e
+            else:
+                # Raise non-404 errors (auth, server, etc.) immediately
+                raise e
+
+    raise Exception(f"All Groq fallback models failed. Last error: {last_exception}")
+
+
 async def evaluate_job_groq(
     job_dict: dict[str, Any],
     groq_client: Any,
 ) -> Optional[JobEvaluation]:
-    """Evaluate a single job posting asynchronously using Groq Llama-3.1-8B with 6s pacing.
+    """Evaluate a single job posting asynchronously using Groq multi-model fallback rotation with 6s pacing.
 
     Serves as the secondary stage in the multi-provider waterfall, taking over when
-    Gemini hits its 20 daily free requests limit. Strictly enforces a 6-second sleep
-    to maintain throughput below Groq's 12,000 TPM limit.
+    Gemini hits its 20 daily free requests limit. Attempts prioritized models
+    (llama-3.3-70b-versatile -> llama-3.1-8b-instant) and cascades upon 404 model_not_found.
+    Strictly enforces a 6-second sleep to maintain throughput below Groq's 12,000 TPM limit.
 
     Args:
         job_dict: Job dictionary containing title, company, location, platform, description.
@@ -274,32 +350,13 @@ async def evaluate_job_groq(
     """
     prompt = build_job_prompt(job_dict)
 
-    log.info("Evaluating with Groq (Llama-3.1-8b-instant): '%s'", job_dict.get("title", ""))
+    log.info("Evaluating with Groq fallback rotation: '%s'", job_dict.get("title", ""))
 
     # Enforce 6-second pacing to stay under 12,000 TPM limit
     await asyncio.sleep(6)
 
     try:
-        model_name = getattr(config, "GROQ_MODEL", "llama-3.1-8b-instant") or "llama-3.1-8b-instant"
-        response = await groq_client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        f"{SYSTEM_INSTRUCTION}\n\n"
-                        "You are a strict technical recruiter. Output ONLY valid JSON matching schema: "
-                        "{\"is_match\": boolean, \"visa_sponsorship\": string}."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            model=model_name,
-            response_format={"type": "json_object"},
-            temperature=0.1,
-        )
+        response = await evaluate_job_with_model_rotation(prompt, groq_client)
         if not response or not response.choices:
             return None
 
@@ -323,6 +380,8 @@ async def evaluate_job_groq(
             evaluation.is_match,
         )
         return evaluation
+    except GroqQuotaExceededError:
+        raise
     except Exception as exc:
         exc_str = str(exc)
         code = getattr(exc, "status_code", getattr(exc, "code", None))

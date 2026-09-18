@@ -137,7 +137,7 @@ def print_config_check() -> None:
     print(f" * Gemini API Key      : {config.mask_secret(config.GEMINI_API_KEY, 6, 6)}")
     print(f" * Gemini Model        : {config.GEMINI_MODEL}")
     print(f" * Groq API Key        : {config.mask_secret(config.GROQ_API_KEY, 4, 4)}")
-    print(f" * Groq Model          : {getattr(config, 'GROQ_MODEL', 'llama-3.1-8b-instant')}")
+    print(f" * Groq Fallback Models: llama-3.3-70b-versatile -> llama-3.1-8b-instant")
     print(f" * Discord Webhook     : {config.mask_secret(config.DISCORD_WEBHOOK_URL, 35, 6)}")
     print(f" * SerpApi Key         : {config.mask_secret(config.SERPAPI_API_KEY, 4, 4)}")
     print(f" * Apify Token         : {config.mask_secret(config.APIFY_TOKEN, 8, 4)}")

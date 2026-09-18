@@ -435,11 +435,82 @@ def test_evaluate_job_groq_success_and_pacing(monkeypatch):
     # Must have enforced exactly 6-second pacing
     sleep_mock.assert_awaited_once_with(6)
 
-    # Verify model and response_format
+    # Verify model (first in rotation) and response_format
     call_kwargs = mock_groq.chat.completions.create.call_args.kwargs
-    assert call_kwargs["model"] == "llama-3.1-8b-instant"
+    assert call_kwargs["model"] == "llama-3.3-70b-versatile"
     assert call_kwargs["response_format"] == {"type": "json_object"}
     assert call_kwargs["temperature"] == 0.1
+
+
+def test_evaluate_job_groq_rotates_on_404(monkeypatch):
+    """Ensure evaluate_job_groq catches 404 model_not_found on 70B and rotates to 8B."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from evaluator import evaluate_job_groq, JobEvaluation
+
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    # Setup successful response for the second model
+    mock_msg = MagicMock()
+    mock_msg.content = '{"is_match": true, "visa_sponsorship": "Supported"}'
+    mock_choice = MagicMock()
+    mock_choice.message = mock_msg
+    mock_response = MagicMock()
+    mock_response.choices = [mock_choice]
+
+    # First call throws 404 model_not_found, second call returns response
+    mock_groq = MagicMock()
+    mock_groq.chat.completions.create = AsyncMock(
+        side_effect=[
+            Exception("Error 404: model_not_found for llama-3.3-70b-versatile"),
+            mock_response,
+        ]
+    )
+
+    job_data = {
+        "title": "Firmware Engineer",
+        "company": "Medtronic",
+        "location": "Bangalore",
+        "platform": "Workday ATS",
+        "description": "Embedded C firmware",
+    }
+
+    res = asyncio.run(evaluate_job_groq(job_data, mock_groq))
+
+    assert res is not None
+    assert isinstance(res, JobEvaluation)
+    assert res.is_match is True
+    assert res.visa_sponsorship == "Supported"
+
+    # Verify that create was called twice: first with 70b, then rotated to 8b
+    assert mock_groq.chat.completions.create.call_count == 2
+    first_call_model = mock_groq.chat.completions.create.call_args_list[0].kwargs["model"]
+    second_call_model = mock_groq.chat.completions.create.call_args_list[1].kwargs["model"]
+    assert first_call_model == "llama-3.3-70b-versatile"
+    assert second_call_model == "llama-3.1-8b-instant"
+
+
+def test_evaluate_job_groq_all_models_fail_404(monkeypatch):
+    """Ensure evaluate_job_groq returns None safely if all fallback models fail with 404."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from evaluator import evaluate_job_groq
+
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    mock_groq = MagicMock()
+    mock_groq.chat.completions.create = AsyncMock(
+        side_effect=[
+            Exception("Error 404: model_not_found for llama-3.3-70b-versatile"),
+            Exception("Error 404: model_not_found for llama-3.1-8b-instant"),
+        ]
+    )
+
+    job_data = {"title": "Hardware Engineer", "company": "Philips"}
+    res = asyncio.run(evaluate_job_groq(job_data, mock_groq))
+
+    assert res is None
+    assert mock_groq.chat.completions.create.call_count == 2
 
 
 def test_evaluate_job_groq_handles_markdown_code_fences(monkeypatch):
@@ -477,7 +548,7 @@ def test_evaluate_job_groq_raises_on_429(monkeypatch):
 
     mock_groq = MagicMock()
     mock_groq.chat.completions.create = AsyncMock(
-        side_effect=Exception("Error 429: Rate limit reached for llama-3.1-8b-instant")
+        side_effect=Exception("Error 429: Rate limit reached for llama-3.3-70b-versatile")
     )
 
     job_data = {"title": "Firmware Engineer", "company": "Medtronic"}

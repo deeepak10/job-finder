@@ -83,9 +83,10 @@ flowchart TD
 * Queries unauthenticated REST career endpoints for Tier-1 MedTech conglomerates (**Medtronic**, **Philips**) before postings hit third-party aggregators.
 * Executes a primary search `POST` followed by an automated secondary detail `GET` request (`jobPostingInfo.jobDescription`) to hydrate the complete posting text for LLM semantic evaluation.
 
-### 2. Multi-Provider LLM Waterfall (Gemini &rarr; Groq Llama-3.1-8B)
+### 2. Multi-Provider LLM Waterfall & Groq Multi-Model Rotation
 * **Primary Stage:** Evaluates candidates through Google Gemini (`gemini-3.6-flash`) with structured Pydantic schemas and 4.5-second pacing delay to exhaust the 20 free daily requests.
-* **Autonomous Failover:** Catches `429 RESOURCE_EXHAUSTED` and immediately switches the evaluation queue to Groq Cloud (`llama-3.1-8b-instant`).
+* **Autonomous Failover:** Catches `429 RESOURCE_EXHAUSTED` and immediately switches the evaluation queue to Groq Cloud.
+* **Dynamic Model Rotation:** Prioritizes `llama-3.3-70b-versatile` and automatically cascades to `llama-3.1-8b-instant` if an HTTP 404 `model_not_found` error occurs.
 * **Rate-Limit Pacer:** Enforces a strict 6-second `asyncio.sleep()` per evaluation on Groq to respect the 12,000 Tokens Per Minute (TPM) free-tier ceiling.
 
 ### 3. API Quota Time-Gating & GitHub Actions Cron Alignment
