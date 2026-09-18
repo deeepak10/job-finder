@@ -92,7 +92,7 @@ def test_add_job_sql_matches_lean_schema():
     assert "ai_reasoning" not in sql
     assert "portfolio_highlight" not in sql
     assert "outreach_message" not in sql
-    assert len(args) == 10  # job_id, title, company, location, platform, url, ai_score, visa_sponsorship, date_found, alert_sent
+    assert len(args) == 12  # job_id, title, company, location, platform, url, description, ai_score, visa_sponsorship, date_found, alert_sent, status
     assert "Some reasoning" not in args
     assert "Project A" not in args
     assert "Draft" not in args

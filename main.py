@@ -39,18 +39,22 @@ import aiohttp
 import config
 from database import (
     add_job,
+    get_deferred_jobs,
     get_stats,
     init_db,
     is_job_seen,
     mark_alert_sent,
     title_company_hash,
+    update_job_status,
 )
 from evaluator import (
     GeminiQuotaExceededError,
     GroqQuotaExceededError,
     JobEvaluation,
     evaluate_job,
+    evaluate_job_consensus,
     evaluate_job_groq,
+    evaluate_with_consensus,
 )
 from filters import clean_html_text, is_spam_title
 from scrapers import collect_all, collect_all_async
@@ -67,6 +71,11 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Run scraping, filtering, and LLM evaluation without persisting to Turso or sending Discord alerts.",
+    )
+    parser.add_argument(
+        "--re-eval-deferred",
+        action="store_true",
+        help="Force sweep and re-evaluation of deferred queue from Turso Cloud Database.",
     )
     parser.add_argument(
         "--no-naukri",
@@ -138,6 +147,9 @@ def print_config_check() -> None:
     print(f" * Gemini Model        : {config.GEMINI_MODEL}")
     print(f" * Groq API Key        : {config.mask_secret(config.GROQ_API_KEY, 4, 4)}")
     print(f" * Groq Fallback Models: llama-3.3-70b-versatile -> llama-3.1-8b-instant")
+    print(f" * Groq Ensemble Model : {config.GROQ_ENSEMBLE_MODEL}")
+    print(f" * OpenRouter API Key  : {config.mask_secret(config.OPENROUTER_API_KEY, 8, 4)}")
+    print(f" * OpenRouter Model    : {config.OPENROUTER_MODEL}")
     print(f" * Discord Webhook     : {config.mask_secret(config.DISCORD_WEBHOOK_URL, 35, 6)}")
     print(f" * SerpApi Key         : {config.mask_secret(config.SERPAPI_API_KEY, 4, 4)}")
     print(f" * Apify Token         : {config.mask_secret(config.APIFY_TOKEN, 8, 4)}")
@@ -178,9 +190,11 @@ class PipelineMetrics:
         self.scraped: int = 0
         self.seen_skipped: int = 0
         self.spam_discarded: int = 0
+        self.deferred_swept: int = 0
         self.evaluated: int = 0
         self.high_matches: int = 0
         self.alerts_sent: int = 0
+        self.deferred_added: int = 0
         self.lock = asyncio.Lock()
 
     async def inc_seen(self) -> None:
@@ -191,13 +205,15 @@ class PipelineMetrics:
         async with self.lock:
             self.spam_discarded += 1
 
-    async def inc_evaluated(self, is_high_match: bool, alerted: bool) -> None:
+    async def inc_evaluated(self, is_high_match: bool, alerted: bool, is_deferred: bool = False) -> None:
         async with self.lock:
             self.evaluated += 1
             if is_high_match:
                 self.high_matches += 1
             if alerted:
                 self.alerts_sent += 1
+            if is_deferred:
+                self.deferred_added += 1
 
 
 async def process_job(
@@ -235,7 +251,9 @@ async def process_job(
     try:
         evaluation = await evaluate_job(job_payload, semaphore)
     except GeminiQuotaExceededError:
-        if getattr(config, "GROQ_API_KEY", None):
+        if getattr(config, "OPENROUTER_API_KEY", None) and getattr(config, "GROQ_API_KEY", None):
+            evaluation = await evaluate_job_consensus(job_payload)
+        elif getattr(config, "GROQ_API_KEY", None):
             try:
                 from groq import AsyncGroq
                 groq_client = AsyncGroq(api_key=config.GROQ_API_KEY)
@@ -250,6 +268,7 @@ async def process_job(
         log.warning("Evaluation failed or skipped for '%s' @ %s", job.title, job.company)
         return
 
+    status_val = getattr(evaluation, "status", "active")
     is_high_match = bool(evaluation.is_match)
     job_id = title_company_hash(job.title, job.company)
     record = {
@@ -259,37 +278,48 @@ async def process_job(
         "location": job.location,
         "platform": job.platform,
         "url": job.url,
+        "description": job.description,
         "ai_score": getattr(evaluation, "match_score", None),
         "visa_sponsorship": evaluation.visa_sponsorship,
         "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "alert_sent": 0,
+        "status": status_val,
     }
 
     if dry_run:
         log.info(
-            "[DRY RUN] Evaluated '%s' @ %s -> Match: %s",
+            "[DRY RUN] Evaluated '%s' @ %s -> Match: %s, Status: %s",
             job.title,
             job.company,
             evaluation.is_match,
+            status_val,
         )
         if metrics:
-            await metrics.inc_evaluated(is_high_match=is_high_match, alerted=False)
+            await metrics.inc_evaluated(
+                is_high_match=(is_high_match and status_val != "deferred"),
+                alerted=False,
+                is_deferred=(status_val == "deferred"),
+            )
         return
 
     # --- Persistence to Turso Cloud ---
     saved = await add_job(record)
     if saved:
-        log.info("Saved evaluated job to Turso: '%s' @ %s", job.title, job.company)
+        log.info("Saved evaluated job to Turso: '%s' @ %s (status: %s)", job.title, job.company, status_val)
 
     # --- Layer 5: Non-Blocking Discord Notification Engine ---
     alert_delivered = False
-    if is_high_match:
+    if is_high_match and status_val != "deferred":
         alert_delivered = await send_discord_alert_async(job_payload, evaluation, session=session)
         if alert_delivered:
             await mark_alert_sent(job_id)
 
     if metrics:
-        await metrics.inc_evaluated(is_high_match=is_high_match, alerted=alert_delivered)
+        await metrics.inc_evaluated(
+            is_high_match=(is_high_match and status_val != "deferred"),
+            alerted=alert_delivered,
+            is_deferred=(status_val == "deferred"),
+        )
 
 
 async def run_scrapers_concurrently(
@@ -466,16 +496,49 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     print(f"[{_ts()}] >>> [Database Deduplication Phase] END | Duration: {t_dedup_elapsed:.2f}s | Fresh: {len(candidate_jobs)} jobs")
 
     if not candidate_jobs:
-        log.info("No fresh candidate jobs to evaluate after deduplication. Exiting pipeline.")
+        log.info("No fresh candidate jobs to evaluate after deduplication.")
+
+    # Check for deferred jobs to sweep and re-evaluate during morning run or explicit flag
+    current_hour_utc = datetime.now(timezone.utc).hour
+    is_morning_run = current_hour_utc <= 4
+    sweep_deferred = is_morning_run or getattr(args, "re_eval_deferred", False)
+
+    if sweep_deferred and not args.dry_run and config.TURSO_DATABASE_URL and config.TURSO_AUTH_TOKEN:
+        try:
+            pending_deferred = await get_deferred_jobs(limit=50)
+            if pending_deferred:
+                log.info(
+                    "Morning run/flag detected: Swept %d deferred job(s) from Turso queue for re-evaluation.",
+                    len(pending_deferred),
+                )
+                print(f"[{_ts()}] [Queue] Swept {len(pending_deferred)} deferred job(s) from Turso for morning re-evaluation.")
+                metrics.deferred_swept = len(pending_deferred)
+                seen_ids = {title_company_hash(j.title, j.company) for j in candidate_jobs}
+                for d_job in pending_deferred:
+                    d_hash = d_job.get("job_id") or title_company_hash(d_job.get("title", ""), d_job.get("company", ""))
+                    if d_hash not in seen_ids:
+                        candidate_jobs.append(JobResult(
+                            title=d_job.get("title", ""),
+                            company=d_job.get("company", ""),
+                            url=d_job.get("url", ""),
+                            platform=d_job.get("platform", "deferred"),
+                            location=d_job.get("location", ""),
+                            description=d_job.get("description", ""),
+                        ))
+                        seen_ids.add(d_hash)
+        except Exception as exc:
+            log.warning("Could not sweep deferred jobs from Turso: %s", exc)
+
+    if not candidate_jobs:
+        log.info("No fresh candidate or deferred jobs to evaluate. Exiting pipeline.")
         return
 
     # =========================================================================
     # Phase 3: [Gemini Evaluation Phase]
     # =========================================================================
     t_eval_start = time.perf_counter()
-    # Smart Quota Slicing: Process max 6 candidate jobs per run only when Groq fallback is not configured
-    # (When Groq is available, Gemini evaluates its 20 daily free requests then falls back to Groq for the queue)
-    if not getattr(config, "GROQ_API_KEY", None):
+    # Smart Quota Slicing: Process max 6 candidate jobs per run only when fallbacks are not configured
+    if not getattr(config, "GROQ_API_KEY", None) and not getattr(config, "OPENROUTER_API_KEY", None):
         candidate_jobs = candidate_jobs[:6]
 
     print(f"\n[{_ts()}] >>> [Evaluation Phase] START | Evaluating {len(candidate_jobs)} jobs")
@@ -486,7 +549,8 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     async def evaluate_and_persist(
         job: JobResult,
         session: aiohttp.ClientSession,
-        use_groq: bool = False,
+        use_fallback: bool = False,
+        use_consensus: bool = False,
         groq_client: Any = None,
     ) -> None:
         job_payload = {
@@ -497,8 +561,11 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
             "description": job.description,
             "url": job.url,
         }
-        if not use_groq:
+        if not use_fallback:
             evaluation = await evaluate_job(job_payload, semaphore)
+        elif use_consensus:
+            # Dual-model consensus fallback (Groq + OpenRouter)
+            evaluation = await evaluate_job_consensus(job_payload)
         else:
             evaluation = await evaluate_job_groq(job_payload, groq_client)
 
@@ -506,6 +573,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
             log.warning("Evaluation failed, timed out, or skipped for '%s' @ %s", job.title, job.company)
             return
 
+        status_val = getattr(evaluation, "status", "active")
         is_high_match = bool(evaluation.is_match)
         job_id = title_company_hash(job.title, job.company)
         record = {
@@ -515,37 +583,49 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
             "location": job.location,
             "platform": job.platform,
             "url": job.url,
+            "description": job.description,
             "ai_score": getattr(evaluation, "match_score", None),
             "visa_sponsorship": evaluation.visa_sponsorship,
             "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "alert_sent": 0,
+            "status": status_val,
         }
 
         if args.dry_run:
             log.info(
-                "[DRY RUN] Evaluated '%s' @ %s -> Match: %s",
+                "[DRY RUN] Evaluated '%s' @ %s -> Match: %s, Status: %s",
                 job.title,
                 job.company,
                 evaluation.is_match,
+                status_val,
             )
-            await metrics.inc_evaluated(is_high_match=is_high_match, alerted=False)
+            await metrics.inc_evaluated(
+                is_high_match=(is_high_match and status_val != "deferred"),
+                alerted=False,
+                is_deferred=(status_val == "deferred"),
+            )
             return
 
-        # Persistence to Turso Cloud
+        # Persistence to Turso Cloud (persists active, consensus_passed, and deferred records)
         saved = await add_job(record)
         if saved:
-            log.info("Saved evaluated job to Turso: '%s' @ %s", job.title, job.company)
+            log.info("Saved evaluated job to Turso: '%s' @ %s (status: %s)", job.title, job.company, status_val)
 
-        # Layer 5: Non-Blocking Discord Notification Engine
+        # Layer 5: Non-Blocking Discord Notification Engine (Only alert on confirmed matches)
         alert_delivered = False
-        if is_high_match:
+        if is_high_match and status_val != "deferred":
             alert_delivered = await send_discord_alert_async(job_payload, evaluation, session=session)
             if alert_delivered:
                 await mark_alert_sent(job_id)
 
-        await metrics.inc_evaluated(is_high_match=is_high_match, alerted=alert_delivered)
+        await metrics.inc_evaluated(
+            is_high_match=(is_high_match and status_val != "deferred"),
+            alerted=alert_delivered,
+            is_deferred=(status_val == "deferred"),
+        )
 
-    use_groq_fallback = False
+    use_fallback = False
+    use_consensus = bool(getattr(config, "OPENROUTER_API_KEY", None))
     groq_client = None
     queue = list(candidate_jobs)
     total_candidates = len(candidate_jobs)
@@ -555,7 +635,13 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
         while queue:
             job = queue.pop(0)
             eval_index += 1
-            provider_tag = "Groq (Llama-3.1-8B)" if use_groq_fallback else "Gemini"
+            if not use_fallback:
+                provider_tag = "Gemini"
+            elif use_consensus:
+                provider_tag = "Ensemble Consensus (Groq + OpenRouter)"
+            else:
+                provider_tag = "Groq (Fallback Rotation)"
+
             log.info(
                 "Evaluating candidate job %d/%d with %s: '%s' @ %s",
                 eval_index,
@@ -565,11 +651,10 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                 job.company,
             )
             try:
-                if not use_groq_fallback:
-                    await evaluate_and_persist(job, session, use_groq=False)
+                if not use_fallback:
+                    await evaluate_and_persist(job, session, use_fallback=False)
                 else:
-                    # Fallback: Groq Llama-3.1-8B Execution
-                    if not groq_client:
+                    if not use_consensus and not groq_client:
                         if getattr(config, "GROQ_API_KEY", None):
                             try:
                                 from groq import AsyncGroq
@@ -581,7 +666,13 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             log.error("Groq API key missing. Cannot use fallback. Aborting.")
                             break
 
-                    await evaluate_and_persist(job, session, use_groq=True, groq_client=groq_client)
+                    await evaluate_and_persist(
+                        job,
+                        session,
+                        use_fallback=True,
+                        use_consensus=use_consensus,
+                        groq_client=groq_client,
+                    )
 
             except Exception as exc:
                 error_msg = str(exc)
@@ -594,19 +685,38 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                 )
 
                 if is_quota:
-                    if not use_groq_fallback:
+                    if not use_fallback:
                         log.warning(
-                            "Gemini API quota exhausted (429 RESOURCE_EXHAUSTED): %s. Activating Groq Llama-3.1-8B fallback...",
+                            "Gemini API quota exhausted (429 RESOURCE_EXHAUSTED): %s. Activating secondary fallback...",
                             exc,
                         )
-                        print(f"[{_ts()}] [!] Gemini API quota exhausted (429). Activating Groq Llama-3.1-8B fallback...")
-                        use_groq_fallback = True
+                        print(f"[{_ts()}] [!] Gemini API quota exhausted (429). Activating secondary fallback tier...")
+                        use_fallback = True
                         eval_index -= 1
-                        queue.insert(0, job)  # Retry current job with Groq
+                        queue.insert(0, job)  # Retry current job with fallback
                         continue
                     else:
-                        log.warning("Groq API limit reached: %s. Aborting evaluation phase early.", exc)
-                        print(f"[{_ts()}] [!] Groq API limit reached. Aborting evaluation phase early.")
+                        log.warning("Secondary fallback quota/rate limit reached: %s. Deferring remaining queue to Turso.", exc)
+                        print(f"[{_ts()}] [!] Secondary fallback limit reached. Deferring remaining queue to Turso.")
+                        # Securely persist remaining jobs as deferred in Turso
+                        if not args.dry_run:
+                            for remaining_job in [job] + queue:
+                                rec = {
+                                    "job_id": title_company_hash(remaining_job.title, remaining_job.company),
+                                    "title": remaining_job.title,
+                                    "company": remaining_job.company,
+                                    "location": remaining_job.location,
+                                    "platform": remaining_job.platform,
+                                    "url": remaining_job.url,
+                                    "description": remaining_job.description,
+                                    "ai_score": 0,
+                                    "visa_sponsorship": "Unknown",
+                                    "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                    "alert_sent": 0,
+                                    "status": "deferred",
+                                }
+                                await add_job(rec)
+                                metrics.deferred_added += 1
                         break
                 else:
                     log.error("Unexpected evaluation error for '%s' @ %s: %s", job.title, job.company, exc)
@@ -624,11 +734,13 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     print(" [PIPELINE RUN METRICS SUMMARY]")
     print("=" * 60)
     print(f" * Total Postings Collected : {metrics.scraped}")
+    print(f" * Deferred Swept (Morning) : {metrics.deferred_swept}")
     print(f" * Layer 0 Skipped (Seen)   : {metrics.seen_skipped}")
     print(f" * Layer 1 Discarded (Spam) : {metrics.spam_discarded}")
     print(f" * Layer 4 Evaluated (AI)   : {metrics.evaluated}")
     print(f" * High Matches (>= 70)     : {metrics.high_matches}")
     print(f" * Discord Alerts Sent      : {metrics.alerts_sent}")
+    print(f" * Jobs Deferred To Queue   : {metrics.deferred_added}")
     print(f" * Execution Duration       : {total_elapsed:.2f}s")
     print("=" * 60 + "\n")
 

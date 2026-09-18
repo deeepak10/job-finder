@@ -12,11 +12,13 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, Optional
 
 from google import genai
 from google.genai import types
+from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
@@ -54,6 +56,14 @@ class JobEvaluation(BaseModel):
     visa_sponsorship: str = Field(
         description="Concise extraction of work authorization, visa sponsorship, or relocation support status"
     )
+    ai_score: Optional[int] = Field(
+        default=None,
+        description="Calculated match score between 0 and 100",
+    )
+    status: str = Field(
+        default="active",
+        description="Evaluation status: active, consensus_passed, or deferred",
+    )
 
     @property
     def reasoning(self) -> str:
@@ -61,7 +71,7 @@ class JobEvaluation(BaseModel):
 
     @property
     def match_score(self) -> Optional[int]:
-        return None
+        return self.ai_score
 
     @property
     def portfolio_highlight(self) -> str:
@@ -462,3 +472,128 @@ async def evaluate_jobs_batch(
 
     tasks = [_eval_one(job) for job in jobs]
     return await asyncio.gather(*tasks)
+
+
+# --------------------------------------------------------------------------
+# Multi-Provider Consensus Fallback (Groq + OpenRouter)
+# --------------------------------------------------------------------------
+
+groq_client = AsyncOpenAI(
+    api_key=getattr(config, "GROQ_API_KEY", "") or "mock-key",
+    base_url="https://api.groq.com/openai/v1",
+)
+
+openrouter_client = AsyncOpenAI(
+    api_key=getattr(config, "OPENROUTER_API_KEY", "") or "mock-key",
+    base_url="https://openrouter.ai/api/v1",
+)
+
+
+async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Optional[dict[str, Any]]:
+    """Helper function to query an OpenAI-compatible endpoint safely and parse JSON response."""
+    try:
+        response = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"{SYSTEM_INSTRUCTION}\n\n"
+                        "You are a strict technical recruiter evaluating biomedical and firmware roles. "
+                        "Output ONLY a valid JSON object containing keys: is_match (bool), visa_sponsorship (str), ai_score (int)."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            model=model_name,
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        if not response or not response.choices:
+            return None
+        content = response.choices[0].message.content or ""
+        raw_text = content.strip()
+        if raw_text.startswith("```"):
+            lines = raw_text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            raw_text = "\n".join(lines).strip()
+        return json.loads(raw_text)
+    except Exception as e:
+        log.error("Error querying model %s: %s", model_name, e)
+        return None
+
+
+async def evaluate_with_consensus(
+    prompt: str,
+    groq_cli: Optional[AsyncOpenAI] = None,
+    router_cli: Optional[AsyncOpenAI] = None,
+) -> dict[str, Any]:
+    """Queries Groq (openai/gpt-oss-120b) and OpenRouter concurrently, enforcing strict consensus.
+
+    If models disagree or fail, defaults to deferred status for next-day batch processing.
+    """
+    g_client = groq_cli or groq_client
+    r_client = router_cli or openrouter_client
+
+    log.info("Triggering dual-model consensus fallback (Groq + OpenRouter)...")
+
+    # If keys are missing from runtime environment, defer immediately
+    if not getattr(config, "GROQ_API_KEY", ""):
+        log.warning("GROQ_API_KEY is not configured. Deferring job evaluation.")
+        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "status": "deferred"}
+    if not getattr(config, "OPENROUTER_API_KEY", ""):
+        log.warning("OPENROUTER_API_KEY is not configured. Deferring job evaluation.")
+        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "status": "deferred"}
+
+    groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
+    router_model = getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat")
+
+    groq_task = query_model(g_client, groq_model, prompt)
+    openrouter_task = query_model(r_client, router_model, prompt)
+
+    results = await asyncio.gather(groq_task, openrouter_task, return_exceptions=True)
+
+    groq_res = results[0] if isinstance(results[0], dict) else None
+    openrouter_res = results[1] if isinstance(results[1], dict) else None
+
+    # If both models failed to respond correctly
+    if not groq_res or not openrouter_res:
+        log.warning("One or more ensemble models failed. Deferring job evaluation.")
+        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "status": "deferred"}
+
+    groq_match = bool(groq_res.get("is_match", False))
+    router_match = bool(openrouter_res.get("is_match", False))
+
+    # Strict Consensus Reconciliation: Both must agree it's a match
+    if groq_match and router_match:
+        groq_score = groq_res.get("ai_score") or 0
+        router_score = openrouter_res.get("ai_score") or 0
+        avg_score = (groq_score + router_score) / 2
+        return {
+            "is_match": True,
+            "visa_sponsorship": groq_res.get("visa_sponsorship") or openrouter_res.get("visa_sponsorship") or "Not Specified",
+            "ai_score": int(avg_score),
+            "status": "consensus_passed",
+        }
+
+    # Disagreement or false results are deferred to keep signal precision clean
+    log.info("Consensus conflict: Groq match=%s, OpenRouter match=%s. Deferring job.", groq_match, router_match)
+    return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "status": "deferred"}
+
+
+async def evaluate_job_consensus(
+    job_dict: dict[str, Any],
+    groq_cli: Optional[AsyncOpenAI] = None,
+    router_cli: Optional[AsyncOpenAI] = None,
+) -> JobEvaluation:
+    """Evaluate a single job posting using dual-model consensus fallback."""
+    prompt = build_job_prompt(job_dict)
+    res_dict = await evaluate_with_consensus(prompt, groq_cli=groq_cli, router_cli=router_cli)
+    return JobEvaluation(
+        is_match=res_dict.get("is_match", False),
+        visa_sponsorship=res_dict.get("visa_sponsorship", "Unknown"),
+        ai_score=res_dict.get("ai_score"),
+        status=res_dict.get("status", "deferred"),
+    )

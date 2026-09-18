@@ -39,10 +39,12 @@ CREATE TABLE IF NOT EXISTS job_postings (
     location            TEXT,
     platform            TEXT    NOT NULL,
     url                 TEXT    NOT NULL,
+    description         TEXT,
     ai_score            INTEGER,
     visa_sponsorship    TEXT,
     date_found          TEXT,
-    alert_sent          INTEGER DEFAULT 0
+    alert_sent          INTEGER DEFAULT 0,
+    status              TEXT DEFAULT 'active'
 );
 """
 
@@ -50,6 +52,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_jobs_url ON job_postings (url);",
     "CREATE INDEX IF NOT EXISTS idx_jobs_date_found ON job_postings (date_found DESC);",
     "CREATE INDEX IF NOT EXISTS idx_jobs_score ON job_postings (ai_score DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_status ON job_postings (status);",
 ]
 
 
@@ -145,6 +148,17 @@ async def init_db(client: Optional[AsyncTursoConnection] = None) -> None:
         await client.execute_query(SCHEMA)
         for idx_sql in INDEXES:
             await client.execute_query(idx_sql)
+
+        # Ensure description and status columns exist for schema migrations
+        for col_def in (
+            ("description", "TEXT"),
+            ("status", "TEXT DEFAULT 'active'"),
+        ):
+            try:
+                await client.execute_query(f"ALTER TABLE job_postings ADD COLUMN {col_def[0]} {col_def[1]};")
+                log.info("Added column '%s' to job_postings.", col_def[0])
+            except Exception:
+                pass  # Column already exists
 
         # Drop legacy columns if present in existing table
         for legacy_col in ("ai_reasoning", "portfolio_highlight", "outreach_message"):
@@ -316,16 +330,19 @@ async def add_job(
 
     # Determine job_id: prefer hash(title + company) as primary identity
     job_id = job.get("job_id") or title_company_hash(title, company)
+    description = (job.get("description") or "").strip()
     ai_score = job.get("ai_score")
     visa_sponsorship = job.get("visa_sponsorship") or ""
     date_found = job.get("date_found") or datetime.now(timezone.utc).isoformat(timespec="seconds")
     alert_sent = int(bool(job.get("alert_sent", 0)))
+    status = (job.get("status") or "active").strip()
 
     sql = """
     INSERT OR REPLACE INTO job_postings (
         job_id, title, company, location, platform, url,
-        ai_score, visa_sponsorship, date_found, alert_sent
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        description, ai_score, visa_sponsorship, date_found,
+        alert_sent, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     args = [
         job_id,
@@ -334,10 +351,12 @@ async def add_job(
         location,
         platform,
         url,
+        description,
         ai_score,
         visa_sponsorship,
         date_found,
         alert_sent,
+        status,
     ]
 
     close_client = False
@@ -354,6 +373,89 @@ async def add_job(
         return True
     except Exception as exc:
         log.error("Failed to insert job '%s' at %s into Turso: %s", title, company, exc)
+        return False
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
+async def get_deferred_jobs(
+    limit: int = 50,
+    client: Optional[AsyncTursoConnection] = None,
+) -> list[dict[str, Any]]:
+    """Retrieve jobs with status 'deferred' to be re-evaluated during morning runs.
+
+    Args:
+        limit: Maximum number of deferred jobs to retrieve (default: 50).
+        client: Optional shared AsyncTursoConnection instance.
+
+    Returns:
+        List of dictionaries containing deferred job records.
+    """
+    sql = "SELECT * FROM job_postings WHERE status = 'deferred' ORDER BY date_found ASC LIMIT ?"
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        res = await client.execute_query(sql, [limit])
+        return parse_turso_rows(res)
+    except Exception as exc:
+        log.warning("Failed to query deferred jobs from Turso: %s", exc)
+        return []
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
+async def update_job_status(
+    job_id: str,
+    status: str,
+    ai_score: Optional[int] = None,
+    visa_sponsorship: Optional[str] = None,
+    alert_sent: Optional[int] = None,
+    client: Optional[AsyncTursoConnection] = None,
+) -> bool:
+    """Update status, score, visa sponsorship, and alert status for an existing job posting.
+
+    Args:
+        job_id: Unique primary key of the job posting.
+        status: New status (e.g., 'active', 'consensus_passed', 'deferred').
+        ai_score: Optional integer score.
+        visa_sponsorship: Optional visa sponsorship string.
+        alert_sent: Optional flag (0 or 1).
+        client: Optional shared AsyncTursoConnection instance.
+
+    Returns:
+        True if updated successfully, False otherwise.
+    """
+    updates = ["status = ?"]
+    args: list[Any] = [status]
+
+    if ai_score is not None:
+        updates.append("ai_score = ?")
+        args.append(ai_score)
+    if visa_sponsorship is not None:
+        updates.append("visa_sponsorship = ?")
+        args.append(visa_sponsorship)
+    if alert_sent is not None:
+        updates.append("alert_sent = ?")
+        args.append(int(bool(alert_sent)))
+
+    args.append(job_id)
+    sql = f"UPDATE job_postings SET {', '.join(updates)} WHERE job_id = ?"
+
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        res = await client.execute_query(sql, args)
+        return bool(res.get("rows_affected", 0) > 0 or not res.get("error"))
+    except Exception as exc:
+        log.warning("Failed to update status for job '%s': %s", job_id, exc)
         return False
     finally:
         if close_client and client.session:

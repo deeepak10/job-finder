@@ -39,6 +39,11 @@ GEMINI_TIMEOUT_SECONDS: float = 45.0
 # Groq Fallback LLM Evaluation (Multi-Model Rotation: Llama-3.3-70B -> Llama-3.1-8B)
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+GROQ_ENSEMBLE_MODEL: str = os.getenv("GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b").strip()
+
+# OpenRouter Ensemble Evaluation (DeepSeek-Chat)
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat").strip()
 
 # Priority Healthcare Companies (triggers Purple alert color: 986895)
 TARGET_HEALTHCARE_COMPANIES: list[str] = [
@@ -70,6 +75,7 @@ def validate_configuration() -> dict[str, Any]:
         "serpapi_configured": bool(SERPAPI_API_KEY),
         "apify_configured": bool(APIFY_TOKEN),
         "groq_configured": bool(GROQ_API_KEY),
+        "openrouter_configured": bool(OPENROUTER_API_KEY),
         "issues": [],
     }
 

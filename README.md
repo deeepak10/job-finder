@@ -3,15 +3,15 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Database: Turso](https://img.shields.io/badge/database-Turso%20(LibSQL)-00EB8D.svg?logo=sqlite&logoColor=black)](https://turso.tech/)
 [![Primary LLM: Gemini](https://img.shields.io/badge/primary%20LLM-Gemini%203.6%20Flash-4285F4.svg?logo=google&logoColor=white)](https://ai.google.dev/)
-[![Fallback LLM: Groq](https://img.shields.io/badge/fallback%20LLM-Groq%20Llama--3.1--8B-F55036.svg?logo=meta&logoColor=white)](https://groq.com/)
+[![Fallback LLM: Groq & OpenRouter](https://img.shields.io/badge/fallback%20LLM-Groq%20%2B%20OpenRouter%20Ensemble-F55036.svg?logo=meta&logoColor=white)](https://groq.com/)
 [![Browser Automation](https://img.shields.io/badge/automation-Playwright%20Chromium-2EAD33.svg?logo=playwright&logoColor=white)](https://playwright.dev/)
 [![CI/CD: GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions%20(Hardened)-2088FF.svg?logo=github-actions&logoColor=white)](https://github.com/features/actions)
-[![Tests: Pytest](https://img.shields.io/badge/tests-112%20passed-brightgreen.svg?logo=pytest&logoColor=white)](https://pytest.org/)
+[![Tests: Pytest](https://img.shields.io/badge/tests-123%20passed-brightgreen.svg?logo=pytest&logoColor=white)](https://pytest.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 An enterprise-grade, asynchronous Python intelligence pipeline designed to autonomously scrape, deduplicate, filter, semantically evaluate, and deliver real-time alerts for **Biomedical R&D**, **Medical Device Firmware**, **HealthTech**, and **Embedded Systems** engineering opportunities across global epicenters and regional Indian engineering hubs.
 
-Engineered with a **resilient multi-provider LLM waterfall** (Google Gemini &rarr; Groq Llama-3.1-8B), **zero-cost direct enterprise ATS ingestion** (Medtronic, Philips), **quota time-gating**, **serverless cloud persistence** (Turso Cloud LibSQL), and **async Discord notification dispatch**.
+Engineered with a **resilient multi-provider LLM waterfall & ensemble consensus** (Google Gemini &rarr; Groq + OpenRouter), **deferred quota re-evaluation queue**, **zero-cost direct enterprise ATS ingestion** (Medtronic, Philips), **quota time-gating**, **serverless cloud persistence** (Turso Cloud LibSQL), and **async Discord notification dispatch**.
 
 ---
 
@@ -34,24 +34,25 @@ flowchart TD
         QUOTA_FLOW["Run Only During Morning Peak"]
     end
 
-    subgraph L0L2["3. Pre-Processing, Dedup & Token Optimization"]
+    subgraph L0L2["3. Pre-Processing, Dedup & Deferred Queue"]
         TURSO_DEDUP{"Layer 0: Seen in Turso?<br/>(Indexed URL or Title+Company Hash)"}
+        DEFERRED_SWEEP["Morning Sweep: Pull Deferred Jobs<br/>(Re-evaluate with fresh quota)"]
         REGEX_SPAM{"Layer 1: Spam Title Regex?<br/>(Field service, technician, sales)"}
         TOKEN_OPT["Layer 2: BS4 Cleaning & 3,500-Char Capping"]
         DISCARD["Bypassed / Discarded"]
     end
 
-    subgraph EVAL["4. Dual-Provider LLM Waterfall (Paced Evaluation)"]
+    subgraph EVAL["4. Dual-Provider LLM Waterfall & Consensus Ensemble"]
         GEMINI["Primary: Gemini 3.6 Flash<br/>(20 daily requests, 4.5s pacing)"]
         FALLBACK_CHECK{"429 Quota Exceeded?"}
-        GROQ["Fallback: Groq Llama-3.1-8B<br/>(12K TPM cap, strict 6s pacing)"]
+        ENSEMBLE["Secondary Tier: Consensus Fallback<br/>Groq (gpt-oss-120b) + OpenRouter (deepseek)"]
+        CONSENSUS_GATE{"Strict Consensus?<br/>(Both Agree is_match=True)"}
     end
 
     subgraph PERSIST_ALERT["5. Persistence & Delivery"]
-        TURSO[(Turso Cloud SQLite DB)]
-        MATCH_GATE{"is_match == True?"}
+        TURSO[(Turso Cloud SQLite DB<br/>Status: active | consensus_passed | deferred)]
         DISCORD["Discord Webhook Engine<br/>(🟪 Purple: Target HealthTech | 🟦 Blue: Standard)"]
-        STORE_ONLY["Stored Without Alert"]
+        STORE_DEFERRED["Persisted as Deferred<br/>(Pending Morning Sweep)"]
     end
 
     %% Scraper time-gating connections
@@ -59,6 +60,7 @@ flowchart TD
     SERP & LNK & WEL --> GATE
     GATE -->|Yes (Morning)| QUOTA_FLOW --> TURSO_DEDUP
     GATE -->|No (Off-Peak)| DISCARD
+    GATE -->|Morning Run| DEFERRED_SWEEP --> TOKEN_OPT
 
     %% Pipeline flow
     TURSO_DEDUP -->|Already Seen| DISCARD
@@ -67,12 +69,13 @@ flowchart TD
     REGEX_SPAM -->|Clean Candidate| TOKEN_OPT
     TOKEN_OPT --> GEMINI
     GEMINI --> FALLBACK_CHECK
-    FALLBACK_CHECK -->|Success| TURSO
-    FALLBACK_CHECK -->|HTTP 429| GROQ
-    GROQ --> TURSO
-    TURSO --> MATCH_GATE
-    MATCH_GATE -->|Yes| DISCORD
-    MATCH_GATE -->|No| STORE_ONLY
+    FALLBACK_CHECK -->|Success & Match| DISCORD
+    FALLBACK_CHECK -->|HTTP 429| ENSEMBLE
+    ENSEMBLE --> CONSENSUS_GATE
+    CONSENSUS_GATE -->|Yes (Agreed Match)| DISCORD
+    CONSENSUS_GATE -->|Conflict / Quota Hit| STORE_DEFERRED
+    DISCORD --> TURSO
+    STORE_DEFERRED --> TURSO
 ```
 
 ---
@@ -83,11 +86,14 @@ flowchart TD
 * Queries unauthenticated REST career endpoints for Tier-1 MedTech conglomerates (**Medtronic**, **Philips**) before postings hit third-party aggregators.
 * Executes a primary search `POST` followed by an automated secondary detail `GET` request (`jobPostingInfo.jobDescription`) to hydrate the complete posting text for LLM semantic evaluation.
 
-### 2. Multi-Provider LLM Waterfall & Groq Multi-Model Rotation
+### 2. Multi-Provider LLM Waterfall & Ensemble Consensus (Gemini &rarr; Groq + OpenRouter)
 * **Primary Stage:** Evaluates candidates through Google Gemini (`gemini-3.6-flash`) with structured Pydantic schemas and 4.5-second pacing delay to exhaust the 20 free daily requests.
-* **Autonomous Failover:** Catches `429 RESOURCE_EXHAUSTED` and immediately switches the evaluation queue to Groq Cloud.
-* **Dynamic Model Rotation:** Prioritizes `llama-3.3-70b-versatile` and automatically cascades to `llama-3.1-8b-instant` if an HTTP 404 `model_not_found` error occurs.
-* **Rate-Limit Pacer:** Enforces a strict 6-second `asyncio.sleep()` per evaluation on Groq to respect the 12,000 Tokens Per Minute (TPM) free-tier ceiling.
+* **Autonomous Failover:** Catches `429 RESOURCE_EXHAUSTED` and immediately triggers the dual-model ensemble tier.
+* **Strict Consensus Reconciliation:** Concurrently queries Groq (`openai/gpt-oss-120b`, cascading down to `llama-3.3-70b-versatile` / `llama-3.1-8b-instant` on 404) and OpenRouter (`deepseek/deepseek-chat`). A job is only accepted if **both models agree `is_match=True`**, eliminating false-positive notification noise.
+
+### 3. Deferred Re-Evaluation Queue (Turso Cloud SQLite)
+* If models conflict or quotas block evaluation entirely, raw postings are safely stored in Turso Cloud SQLite with `status = 'deferred'` and full text descriptions.
+* During the subsequent morning cron execution (02:00 UTC / 07:30 AM IST), the pipeline automatically sweeps deferred jobs and re-evaluates them using fresh Gemini quotas.
 
 ### 3. API Quota Time-Gating & GitHub Actions Cron Alignment
 * Gating protects SerpApi (250/mo limit) and Apify ($5/mo credits) by restricting their execution to a single morning run:
