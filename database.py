@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS job_postings (
     alert_sent          INTEGER DEFAULT 0,
     status              TEXT DEFAULT 'active',
     tier                TEXT DEFAULT 'strict',
-    match_reason        TEXT DEFAULT ''
+    match_reason        TEXT DEFAULT '',
+    job_category        TEXT DEFAULT 'General'
 );
 """
 
@@ -55,6 +56,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_jobs_score ON job_postings (ai_score DESC);",
     "CREATE INDEX IF NOT EXISTS idx_jobs_status ON job_postings (status);",
     "CREATE INDEX IF NOT EXISTS idx_jobs_tier ON job_postings (tier);",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_category ON job_postings (job_category);",
 ]
 
 
@@ -151,12 +153,13 @@ async def init_db(client: Optional[AsyncTursoConnection] = None) -> None:
         for idx_sql in INDEXES:
             await client.execute_query(idx_sql)
 
-        # Ensure description, status, tier, and match_reason columns exist for schema migrations
+        # Ensure description, status, tier, match_reason, and job_category columns exist for schema migrations
         for col_def in (
             ("description", "TEXT"),
             ("status", "TEXT DEFAULT 'active'"),
             ("tier", "TEXT DEFAULT 'strict'"),
             ("match_reason", "TEXT DEFAULT ''"),
+            ("job_category", "TEXT DEFAULT 'General'"),
         ):
             try:
                 await client.execute_query(f"ALTER TABLE job_postings ADD COLUMN {col_def[0]} {col_def[1]};")
@@ -342,13 +345,14 @@ async def add_job(
     status = (job.get("status") or "active").strip()
     tier = (job.get("tier") or "strict").strip().lower()
     match_reason = (job.get("match_reason") or "").strip()
+    job_category = (job.get("job_category") or "General").strip()
 
     sql = """
     INSERT OR REPLACE INTO job_postings (
         job_id, title, company, location, platform, url,
         description, ai_score, visa_sponsorship, date_found,
-        alert_sent, status, tier, match_reason
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        alert_sent, status, tier, match_reason, job_category
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     args = [
         job_id,
@@ -365,6 +369,7 @@ async def add_job(
         status,
         tier,
         match_reason,
+        job_category,
     ]
 
     close_client = False
@@ -459,9 +464,10 @@ async def update_job_status(
     alert_sent: Optional[int] = None,
     tier: Optional[str] = None,
     match_reason: Optional[str] = None,
+    job_category: Optional[str] = None,
     client: Optional[AsyncTursoConnection] = None,
 ) -> bool:
-    """Update status, score, visa sponsorship, and alert status for an existing job posting.
+    """Update status, score, visa sponsorship, alert status, and category for an existing job posting.
 
     Args:
         job_id: Unique primary key of the job posting.
@@ -471,6 +477,7 @@ async def update_job_status(
         alert_sent: Optional flag (0 or 1).
         tier: Optional tier string ('strict' or 'broad').
         match_reason: Optional 1-sentence match explanation.
+        job_category: Optional category string ('Biomedical_RD', 'ECE_Hardware', 'Software_Web', 'General').
         client: Optional shared AsyncTursoConnection instance.
 
     Returns:
@@ -494,6 +501,9 @@ async def update_job_status(
     if match_reason is not None:
         updates.append("match_reason = ?")
         args.append(match_reason.strip())
+    if job_category is not None:
+        updates.append("job_category = ?")
+        args.append(job_category.strip())
 
     args.append(job_id)
     sql = f"UPDATE job_postings SET {', '.join(updates)} WHERE job_id = ?"

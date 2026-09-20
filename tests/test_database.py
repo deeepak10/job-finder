@@ -81,6 +81,7 @@ def test_add_job_sql_matches_lean_schema():
         "ai_reasoning": "Some reasoning",
         "portfolio_highlight": "Project A",
         "outreach_message": "Draft",
+        "job_category": "Biomedical_RD",
     }
 
     success = asyncio.run(add_job(job_dict, client=mock_client))
@@ -91,10 +92,12 @@ def test_add_job_sql_matches_lean_schema():
     assert "ai_reasoning" not in sql
     assert "portfolio_highlight" not in sql
     assert "outreach_message" not in sql
-    assert len(args) == 14  # job_id, title, company, location, platform, url, description, ai_score, visa_sponsorship, date_found, alert_sent, status, tier, match_reason
+    assert "job_category" in sql
+    assert len(args) == 15  # job_id, title, company, location, platform, url, description, ai_score, visa_sponsorship, date_found, alert_sent, status, tier, match_reason, job_category
     assert "Some reasoning" not in args
     assert "Project A" not in args
     assert "Draft" not in args
+    assert args[-1] == "Biomedical_RD"
 
 
 def test_garbage_collection_nullifies_old_rejected_jobs():

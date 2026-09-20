@@ -63,6 +63,7 @@ def test_embed_structure(sample_job, sample_evaluation):
     assert "🛂 Visa Status" in field_dict and field_dict["🛂 Visa Status"]["inline"] is True
     # Context field for why role was matched
     assert "Why it matched:" in field_dict and field_dict["Why it matched:"]["inline"] is False
+    assert "🏷️ Domain" in field_dict and field_dict["🏷️ Domain"]["inline"] is True
     assert embed.get("footer", {}).get("text") == "Tri-Model AI Routing Pipeline"
 
     # Removed fields to eliminate clutter and token consumption
@@ -113,4 +114,56 @@ def test_send_system_alert_async():
         assert "Pipeline Anomaly Detected" in embed["title"]
         assert "Test failure alert" in embed["description"]
         assert embed["footer"]["text"] == "Job Finder System Monitor"
+
+
+def test_multi_channel_discord_routing(sample_job, monkeypatch):
+    import asyncio
+    import config
+
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/default/111")
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_DEFAULT", "https://discord.com/api/webhooks/default/111")
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_BIOMED", "https://discord.com/api/webhooks/biomed/222")
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_ECE", "https://discord.com/api/webhooks/ece/333")
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_SOFTWARE", "https://discord.com/api/webhooks/software/444")
+
+    # 1. Route Biomedical_RD
+    bio_eval = JobEvaluation(is_match=True, visa_sponsorship="Supported", job_category="Biomedical_RD")
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 200
+        res = asyncio.run(send_discord_alert_async(sample_job, bio_eval))
+        assert res is True
+        assert mock_post.call_args[0][0] == "https://discord.com/api/webhooks/biomed/222"
+
+    # 2. Route ECE_Hardware
+    ece_eval = JobEvaluation(is_match=True, visa_sponsorship="Supported", job_category="ECE_Hardware")
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 200
+        res = asyncio.run(send_discord_alert_async(sample_job, ece_eval))
+        assert res is True
+        assert mock_post.call_args[0][0] == "https://discord.com/api/webhooks/ece/333"
+
+    # 3. Route Software_Web
+    sw_eval = JobEvaluation(is_match=True, visa_sponsorship="Supported", job_category="Software_Web")
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 200
+        res = asyncio.run(send_discord_alert_async(sample_job, sw_eval))
+        assert res is True
+        assert mock_post.call_args[0][0] == "https://discord.com/api/webhooks/software/444"
+
+    # 4. Fallback to default when category is General
+    gen_eval = JobEvaluation(is_match=True, visa_sponsorship="Supported", job_category="General")
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 200
+        res = asyncio.run(send_discord_alert_async(sample_job, gen_eval))
+        assert res is True
+        assert mock_post.call_args[0][0] == "https://discord.com/api/webhooks/default/111"
+
+    # 5. Fallback to default when category webhook is unset in config
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_BIOMED", "")
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 200
+        res = asyncio.run(send_discord_alert_async(sample_job, bio_eval))
+        assert res is True
+        assert mock_post.call_args[0][0] == "https://discord.com/api/webhooks/default/111"
+
 

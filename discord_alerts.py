@@ -52,7 +52,7 @@ def _safe_str(val: Any, max_len: int = 1000, fallback: str = "—") -> str:
 
 def build_discord_embed(
     job: dict[str, Any],
-    evaluation: JobEvaluation,
+    evaluation: Any,
 ) -> dict[str, Any]:
     """Construct the Discord Rich Embed."""
     title = _safe_str(job.get("title"), max_len=240, fallback="Job Posting")
@@ -63,18 +63,33 @@ def build_discord_embed(
     color = pick_embed_color(company)
 
     match_reason = (
-        getattr(evaluation, "match_reason", "")
+        (evaluation.get("match_reason") if isinstance(evaluation, dict) else getattr(evaluation, "match_reason", ""))
         or job.get("match_reason")
         or "Passed semantic evaluation."
     )
+
+    visa_sponsorship = (
+        evaluation.get("visa_sponsorship")
+        if isinstance(evaluation, dict)
+        else getattr(evaluation, "visa_sponsorship", "Not Specified")
+    )
+
+    category = "General"
+    if evaluation and isinstance(evaluation, dict):
+        category = evaluation.get("job_category") or "General"
+    elif hasattr(evaluation, "job_category"):
+        category = getattr(evaluation, "job_category", "General") or "General"
+    elif job and isinstance(job, dict):
+        category = job.get("job_category") or "General"
 
     fields = [
         {"name": "🏢 Company", "value": company, "inline": True},
         {"name": "📍 Location", "value": location, "inline": True},
         {"name": "🌐 Platform", "value": platform, "inline": True},
+        {"name": "🏷️ Domain", "value": _safe_str(category.replace("_", " "), max_len=50, fallback="General"), "inline": True},
         {
             "name": "🛂 Visa Status",
-            "value": _safe_str(evaluation.visa_sponsorship, max_len=200, fallback="Not Specified"),
+            "value": _safe_str(visa_sponsorship, max_len=200, fallback="Not Specified"),
             "inline": True,
         },
         {
@@ -99,32 +114,64 @@ def build_discord_embed(
 
 async def send_discord_alert_async(
     job: dict[str, Any],
-    evaluation: JobEvaluation,
+    evaluation: Any,
     webhook_url: Optional[str] = None,
     session: Optional[aiohttp.ClientSession] = None,
 ) -> bool:
-    """Send alert to Discord webhook asynchronously.
+    """Send alert to Discord webhook asynchronously with multi-channel routing.
 
+    Extracts job_category from AI evaluation and dynamically maps it to
+    channel-specific webhooks (Biomedical, ECE, Software, or General).
     Enforces gating: Only dispatches if is_match is True.
     """
-    if not evaluation.is_match:
+    is_match = False
+    if isinstance(evaluation, dict):
+        is_match = bool(evaluation.get("is_match", False))
+    elif hasattr(evaluation, "is_match"):
+        is_match = bool(getattr(evaluation, "is_match", False))
+
+    if not is_match:
         log.info(
             "Skipping Discord alert for '%s' (is_match=%s)",
             job.get("title"),
-            evaluation.is_match,
+            is_match,
         )
         return False
 
-    target_url = webhook_url or config.DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URL
+    # Extract category from the AI evaluation or fallback to General
+    category = "General"
+    if evaluation and isinstance(evaluation, dict):
+        category = evaluation.get("job_category") or "General"
+    elif hasattr(evaluation, "job_category"):
+        category = getattr(evaluation, "job_category", "General") or "General"
+    elif job and isinstance(job, dict):
+        category = job.get("job_category") or "General"
+
+    # Map the AI's category to the specific webhook
+    webhook_map = {
+        "Biomedical_RD": getattr(config, "DISCORD_WEBHOOK_BIOMED", ""),
+        "ECE_Hardware": getattr(config, "DISCORD_WEBHOOK_ECE", ""),
+        "Software_Web": getattr(config, "DISCORD_WEBHOOK_SOFTWARE", ""),
+        "General": getattr(config, "DISCORD_WEBHOOK_DEFAULT", "") or getattr(config, "DISCORD_WEBHOOK_URL", ""),
+    }
+
+    default_webhook = (
+        getattr(config, "DISCORD_WEBHOOK_DEFAULT", "")
+        or getattr(config, "DISCORD_WEBHOOK_URL", "")
+        or DISCORD_WEBHOOK_URL
+    )
+
+    # Specific argument takes top priority; otherwise route by category with default fallback
+    target_url = webhook_url or webhook_map.get(category) or default_webhook
     if not target_url:
-        log.warning("DISCORD_WEBHOOK_URL not set; skipping notification.")
+        log.warning("No Discord Webhook configured. Cannot send alert.")
         return False
 
     # SSRF protection: only allow official Discord webhook endpoints
     if not target_url.startswith(
         ("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")
     ):
-        log.error("Security alert: DISCORD_WEBHOOK_URL must point to official discord.com endpoints.")
+        log.error("Security alert: Target Discord webhook must point to official discord.com endpoints.")
         return False
 
     embed = build_discord_embed(job, evaluation)
@@ -141,7 +188,7 @@ async def send_discord_alert_async(
     try:
         async with session.post(target_url, json=payload, timeout=aiohttp.ClientTimeout(total=15, connect=5)) as resp:
             if resp.status in (200, 204):
-                log.info("Discord alert delivered for '%s' @ %s", job.get("title"), job.get("company"))
+                log.info("Successfully routed alert to %s channel for '%s' @ %s", category, job.get("title"), job.get("company"))
                 return True
 
             elif resp.status == 429:
@@ -153,10 +200,10 @@ async def send_discord_alert_async(
                     return retry_resp.status in (200, 204)
             else:
                 resp_text = await resp.text()
-                log.warning("Discord webhook returned HTTP %d: %s", resp.status, resp_text[:200])
+                log.warning("Failed to route alert to %s channel. Status: %d: %s", category, resp.status, resp_text[:200])
                 return False
     except Exception as exc:
-        log.error("Failed to send Discord alert for '%s': %s", job.get("title"), exc)
+        log.error("Discord routing error for '%s' (%s): %s", job.get("title"), category, exc)
         return False
     finally:
         if close_session:

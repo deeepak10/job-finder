@@ -160,7 +160,10 @@ def print_config_check() -> None:
     print(f" * Groq Ensemble Model : {config.GROQ_ENSEMBLE_MODEL}")
     print(f" * OpenRouter API Key  : {config.mask_secret(config.OPENROUTER_API_KEY, 8, 4)}")
     print(f" * OpenRouter Model    : {config.OPENROUTER_MODEL}")
-    print(f" * Discord Webhook     : {config.mask_secret(config.DISCORD_WEBHOOK_URL, 35, 6)}")
+    print(f" * Discord Default URL : {config.mask_secret(config.DISCORD_WEBHOOK_DEFAULT, 35, 6)}")
+    print(f" * Discord Biomed URL  : {config.mask_secret(config.DISCORD_WEBHOOK_BIOMED, 35, 6)}")
+    print(f" * Discord ECE URL     : {config.mask_secret(config.DISCORD_WEBHOOK_ECE, 35, 6)}")
+    print(f" * Discord Software URL: {config.mask_secret(config.DISCORD_WEBHOOK_SOFTWARE, 35, 6)}")
     print(f" * SerpApi Key         : {config.mask_secret(config.SERPAPI_API_KEY, 4, 4)}")
     print(f" * Apify Token         : {config.mask_secret(config.APIFY_TOKEN, 8, 4)}")
     print("-" * 60)
@@ -486,12 +489,14 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             # Consensus reached! Both OpenRouter and Groq accept.
                             score = groq_res.get("ai_score") or 75
                             reason = groq_res.get("match_reason") or "Consensus confirmed by Groq"
+                            category = groq_res.get("job_category") or p_job.get("job_category") or "General"
                             await update_job_status(
                                 job_id=p_id,
                                 status="active",
                                 ai_score=score,
                                 visa_sponsorship=groq_res.get("visa_sponsorship"),
                                 match_reason=reason,
+                                job_category=category,
                             )
                             eval_obj = JobEvaluation(
                                 is_match=True,
@@ -499,6 +504,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                                 ai_score=score,
                                 match_reason=reason,
                                 status="active",
+                                job_category=category,
                             )
                             alert_sent = False
                             if score >= 70:
@@ -592,6 +598,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                         "status": status_val,
                         "tier": "strict",
                         "match_reason": getattr(evaluation, "match_reason", "") or "",
+                        "job_category": getattr(evaluation, "job_category", "General") or "General",
                     }
                     alert_delivered = False
                     if not args.dry_run:
@@ -631,6 +638,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "status": "consensus_passed",
                             "tier": "strict",
                             "match_reason": reason,
+                            "job_category": getattr(consensus_eval, "job_category", "General") or "General",
                         }
                         alert_delivered = False
                         if not args.dry_run:
@@ -657,6 +665,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "status": "deferred",
                             "tier": "strict",
                             "match_reason": "Junior Consensus failed to reach unanimous YES. Parked for Gemini.",
+                            "job_category": getattr(consensus_eval, "job_category", "General") or "General",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -704,6 +713,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "status": "rejected",
                             "tier": "broad",
                             "match_reason": groq_res.get("match_reason") or "Groq gatekeeper rejected",
+                            "job_category": groq_res.get("job_category") or "General",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -725,12 +735,14 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                         avg_score = int(((groq_res.get("ai_score") or 75) + (or_res.get("ai_score") or 75)) / 2)
                         log.info("Route B: Both models approved '%s' @ %s (Score: %d)", job.title, job.company, avg_score)
                         reason = groq_res.get("match_reason") or or_res.get("match_reason") or "Ensemble consensus approved"
+                        category = groq_res.get("job_category") or or_res.get("job_category") or "General"
                         eval_obj = JobEvaluation(
                             is_match=True,
                             visa_sponsorship=groq_res.get("visa_sponsorship") or or_res.get("visa_sponsorship") or "Not Specified",
                             ai_score=avg_score,
                             status="active",
                             match_reason=reason,
+                            job_category=category,
                         )
                         rec = {
                             "job_id": job_id,
@@ -747,6 +759,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "status": "active",
                             "tier": "broad",
                             "match_reason": reason,
+                            "job_category": category,
                         }
                         alert_delivered = False
                         if not args.dry_run:
@@ -776,6 +789,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "status": "deferred",
                             "tier": "broad",
                             "match_reason": "Split decision between Groq and OpenRouter",
+                            "job_category": groq_res.get("job_category") or "General",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -812,6 +826,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "status": "rejected",
                             "tier": "broad",
                             "match_reason": or_res.get("match_reason") or "Solo OpenRouter rejected",
+                            "job_category": or_res.get("job_category") or "General",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -839,6 +854,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "status": "pending_groq_verification",
                             "tier": "broad",
                             "match_reason": or_res.get("match_reason") or "Pending Groq verification",
+                            "job_category": or_res.get("job_category") or "General",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -863,6 +879,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "status": "deferred",
                             "tier": "broad",
                             "match_reason": "Both models failed or error",
+                            "job_category": "General",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -902,12 +919,14 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                                 is_match = bool(eval_res.is_match)
                                 score = eval_res.match_score or 0
                                 new_status = "active" if is_match else "rejected"
+                                category = getattr(eval_res, "job_category", "General") or "General"
                                 await update_job_status(
                                     job_id=d_id,
                                     status=new_status,
                                     ai_score=score,
                                     visa_sponsorship=eval_res.visa_sponsorship,
                                     match_reason=eval_res.match_reason,
+                                    job_category=category,
                                 )
                                 alert_sent = False
                                 if is_match and score >= 70:

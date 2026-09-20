@@ -68,6 +68,10 @@ class JobEvaluation(BaseModel):
         default="active",
         description="Evaluation status: active, consensus_passed, or deferred",
     )
+    job_category: str = Field(
+        default="General",
+        description="Category: Biomedical_RD, ECE_Hardware, Software_Web, or General",
+    )
 
     @property
     def reasoning(self) -> str:
@@ -122,7 +126,7 @@ Their technical footprint includes:
 - Embedded hardware systems and IoT water quality monitoring using Arduino and sensors (pH, turbidity, temperature).
 - Machine Learning (Data preprocessing, predictive modeling).
 
-YOUR GOAL: Output ONLY a JSON object with keys: is_match (bool), visa_sponsorship (str), ai_score (int), and match_reason (str).
+YOUR GOAL: Output ONLY a JSON object with keys: is_match (bool), visa_sponsorship (str), ai_score (int), match_reason (str), and job_category (str).
 
 1. CORE PRIORITIES (High ai_score >= 80): 
    Vigorously target R&D roles involving Medical Device development, Biomedical Firmware, IoT sensor integration, Signal Processing, Computer Vision (OpenCV), and Python backend integration with physiological hardware. Boost scores for roles mentioning WebSockets, telemetry, or embedded C/C++.
@@ -138,6 +142,12 @@ YOUR GOAL: Output ONLY a JSON object with keys: is_match (bool), visa_sponsorshi
    - IT Helpdesk, Customer Support, or BPO voice processes.
 
 4. MATCH REASON: Provide a 1-sentence explanation linking the job requirements directly to the candidate's profile.
+
+5. JOB CATEGORIZATION: You MUST categorize the job into exactly ONE of the following strings based on its primary focus:
+   - "Biomedical_RD" (For MedTech, Medical Devices, Clinical Hardware, ECG telemetry)
+   - "ECE_Hardware" (For Embedded C, Arduino, Firmware, Sensors, PCB)
+   - "Software_Web" (For Python, React/Next.js, WebSockets, Computer Vision/OpenCV)
+   - "General" (For generic roles or if it fits none of the above)
 """
 
 SYSTEM_INSTRUCTION = SYSTEM_PROMPT
@@ -331,7 +341,7 @@ async def evaluate_job_with_model_rotation(prompt: str, groq_client: Any) -> Any
                             f"{SYSTEM_INSTRUCTION}\n\n"
                             "You are a strict technical recruiter evaluating biomedical engineering and firmware roles. "
                             "Output ONLY valid JSON matching schema: "
-                            "{\"is_match\": boolean, \"visa_sponsorship\": string}."
+                            "{\"is_match\": boolean, \"visa_sponsorship\": string, \"ai_score\": integer, \"match_reason\": string, \"job_category\": string}."
                         ),
                     },
                     {
@@ -537,7 +547,7 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
                         "content": (
                             f"{SYSTEM_INSTRUCTION}\n\n"
                             "You are a strict technical recruiter evaluating biomedical and firmware roles. "
-                            "Output ONLY a valid JSON object containing keys: is_match (bool), visa_sponsorship (str), ai_score (int), and match_reason (str)."
+                            "Output ONLY a valid JSON object containing keys: is_match (bool), visa_sponsorship (str), ai_score (int), match_reason (str), and job_category (str)."
                         ),
                     },
                     {"role": "user", "content": prompt},
@@ -580,10 +590,10 @@ async def evaluate_with_consensus(
     # If keys are missing from runtime environment, defer immediately
     if not getattr(config, "GROQ_API_KEY", ""):
         log.warning("GROQ_API_KEY is not configured. Deferring job evaluation.")
-        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Missing GROQ_API_KEY", "status": "deferred"}
+        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Missing GROQ_API_KEY", "status": "deferred", "job_category": "General"}
     if not getattr(config, "OPENROUTER_API_KEY", ""):
         log.warning("OPENROUTER_API_KEY is not configured. Deferring job evaluation.")
-        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Missing OPENROUTER_API_KEY", "status": "deferred"}
+        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Missing OPENROUTER_API_KEY", "status": "deferred", "job_category": "General"}
 
     groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
     router_model = getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat")
@@ -599,10 +609,11 @@ async def evaluate_with_consensus(
     # If both models failed to respond correctly
     if not groq_res or not openrouter_res:
         log.warning("One or more ensemble models failed. Deferring job evaluation.")
-        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Ensemble model failure", "status": "deferred"}
+        return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Ensemble model failure", "status": "deferred", "job_category": "General"}
 
     groq_match = bool(groq_res.get("is_match", False))
     router_match = bool(openrouter_res.get("is_match", False))
+    category = groq_res.get("job_category") or openrouter_res.get("job_category") or "General"
 
     # 1. Both ACCEPT -> Consensus Passed
     if groq_match and router_match:
@@ -615,6 +626,7 @@ async def evaluate_with_consensus(
             "ai_score": int(avg_score),
             "match_reason": groq_res.get("match_reason") or openrouter_res.get("match_reason") or "Consensus reached across models.",
             "status": "consensus_passed",
+            "job_category": category,
         }
 
     # 2. Both REJECT -> Consensus Failed (definitive rejection)
@@ -626,6 +638,7 @@ async def evaluate_with_consensus(
             "ai_score": 0,
             "match_reason": groq_res.get("match_reason") or openrouter_res.get("match_reason") or "Both models rejected role.",
             "status": "consensus_failed",
+            "job_category": category,
         }
 
     # 3. Split Decision -> Conflict (parked for Gemini executive tie-breaker)
@@ -636,6 +649,7 @@ async def evaluate_with_consensus(
         "ai_score": 0,
         "match_reason": "Split decision between Groq and OpenRouter.",
         "status": "conflict",
+        "job_category": category,
     }
 
 
@@ -653,4 +667,5 @@ async def evaluate_job_consensus(
         ai_score=res_dict.get("ai_score"),
         match_reason=res_dict.get("match_reason", ""),
         status=res_dict.get("status", "deferred"),
+        job_category=res_dict.get("job_category", "General"),
     )

@@ -27,6 +27,13 @@ LINKEDIN_ACTOR_ID: str = os.getenv("LINKEDIN_ACTOR_ID", "").strip()
 ADZUNA_APP_ID: str = os.getenv("ADZUNA_APP_ID", "").strip()
 ADZUNA_APP_KEY: str = os.getenv("ADZUNA_APP_KEY", "").strip()
 DISCORD_WEBHOOK_URL: str = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+# The original webhook is now the fallback/default
+DISCORD_WEBHOOK_DEFAULT: str = DISCORD_WEBHOOK_URL
+
+# New Category Webhooks (Multi-Channel Control Room)
+DISCORD_WEBHOOK_BIOMED: str = os.getenv("DISCORD_WEBHOOK_BIOMED", "").strip()
+DISCORD_WEBHOOK_ECE: str = os.getenv("DISCORD_WEBHOOK_ECE", "").strip()
+DISCORD_WEBHOOK_SOFTWARE: str = os.getenv("DISCORD_WEBHOOK_SOFTWARE", "").strip()
 
 # Turso Cloud Database
 TURSO_DATABASE_URL: str = os.getenv("TURSO_DATABASE_URL", "").strip()
@@ -73,6 +80,9 @@ def validate_configuration() -> dict[str, Any]:
         "turso_configured": bool(TURSO_DATABASE_URL and TURSO_AUTH_TOKEN),
         "gemini_configured": bool(GEMINI_API_KEY),
         "discord_configured": bool(DISCORD_WEBHOOK_URL),
+        "discord_biomed_configured": bool(DISCORD_WEBHOOK_BIOMED),
+        "discord_ece_configured": bool(DISCORD_WEBHOOK_ECE),
+        "discord_software_configured": bool(DISCORD_WEBHOOK_SOFTWARE),
         "serpapi_configured": bool(SERPAPI_API_KEY),
         "apify_configured": bool(APIFY_TOKEN),
         "groq_configured": bool(GROQ_API_KEY),
@@ -91,10 +101,16 @@ def validate_configuration() -> dict[str, Any]:
     if not GEMINI_API_KEY:
         status["issues"].append("GEMINI_API_KEY is missing.")
 
-    if DISCORD_WEBHOOK_URL and not DISCORD_WEBHOOK_URL.startswith(
-        ("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")
-    ):
-        status["issues"].append("DISCORD_WEBHOOK_URL must start with 'https://discord.com/api/webhooks/'.")
+    for name, hook in [
+        ("DISCORD_WEBHOOK_URL", DISCORD_WEBHOOK_URL),
+        ("DISCORD_WEBHOOK_BIOMED", DISCORD_WEBHOOK_BIOMED),
+        ("DISCORD_WEBHOOK_ECE", DISCORD_WEBHOOK_ECE),
+        ("DISCORD_WEBHOOK_SOFTWARE", DISCORD_WEBHOOK_SOFTWARE),
+    ]:
+        if hook and not hook.startswith(
+            ("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")
+        ):
+            status["issues"].append(f"{name} must start with 'https://discord.com/api/webhooks/'.")
 
     return status
 

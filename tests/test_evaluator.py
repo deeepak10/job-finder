@@ -20,6 +20,8 @@ def test_job_evaluation_schema_validation():
     assert "match_score" not in JobEvaluation.model_fields
     assert "portfolio_highlight" not in JobEvaluation.model_fields
     assert "linkedin_outreach_message" not in JobEvaluation.model_fields
+    assert "job_category" in JobEvaluation.model_fields
+    assert obj.job_category == "General"
 
 
 def test_system_prompt_contains_required_sections():
@@ -33,6 +35,11 @@ def test_system_prompt_contains_required_sections():
     assert "Biomedical Firmware" in SYSTEM_INSTRUCTION
     assert "visa_sponsorship" in SYSTEM_INSTRUCTION
     assert "match_reason" in SYSTEM_INSTRUCTION
+    assert "job_category" in SYSTEM_INSTRUCTION
+    assert "JOB CATEGORIZATION" in SYSTEM_INSTRUCTION
+    assert "Biomedical_RD" in SYSTEM_INSTRUCTION
+    assert "ECE_Hardware" in SYSTEM_INSTRUCTION
+    assert "Software_Web" in SYSTEM_INSTRUCTION
     assert "telemetry" in SYSTEM_INSTRUCTION.lower()
     # Outreach draft instruction removed to conserve LLM generation tokens
     assert "linkedin_outreach_message" not in SYSTEM_INSTRUCTION

@@ -59,6 +59,9 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_BIOMED: ${{ secrets.DISCORD_WEBHOOK_BIOMED }}
+          DISCORD_WEBHOOK_ECE: ${{ secrets.DISCORD_WEBHOOK_ECE }}
+          DISCORD_WEBHOOK_SOFTWARE: ${{ secrets.DISCORD_WEBHOOK_SOFTWARE }}
           SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
