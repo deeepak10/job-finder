@@ -1,6 +1,5 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
-import pytest
 
 import config
 from evaluator import (

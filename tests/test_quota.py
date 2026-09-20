@@ -1,7 +1,6 @@
 """Tests for quota_manager.py"""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import quota_manager
 

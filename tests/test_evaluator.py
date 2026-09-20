@@ -123,7 +123,6 @@ def test_evaluate_job_success(monkeypatch):
 def test_evaluate_job_client_error_fails_gracefully(monkeypatch):
     """Ensure ClientError / ServerError / Exception gracefully returns None and does not crash."""
     import asyncio
-    from google.genai.errors import ClientError
 
     semaphore = asyncio.Semaphore(1)
 

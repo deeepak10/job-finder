@@ -21,7 +21,6 @@ from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
-from tenacity import retry, retry_if_exception_type, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 try:
     from google.genai.errors import ServerError

@@ -1,6 +1,5 @@
 """Tests for Turso Cloud Database layer."""
 
-import pytest
 from database import (
     make_job_id,
     parse_turso_rows,

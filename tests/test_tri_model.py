@@ -1,14 +1,11 @@
 """Tests for Tri-Model Routing Architecture (Executive Tie-Breaker)."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
-import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 import config
 from evaluator import (
-    GeminiQuotaExceededError,
     JobEvaluation,
-    evaluate_job_consensus,
     evaluate_with_consensus,
 )
 from scrapers.base import JobResult

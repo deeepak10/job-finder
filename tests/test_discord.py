@@ -1,7 +1,7 @@
 """Tests for Discord Notification Engine (v2)."""
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from discord_alerts import (
     COLOR_BLUE,

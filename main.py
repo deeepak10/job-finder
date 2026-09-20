@@ -23,7 +23,7 @@ import logging
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 # Ensure line-buffering so logs stream in real-time in GitHub Actions
 try:
@@ -51,19 +51,15 @@ from database import (
 from discord_alerts import send_discord_alert_async
 from evaluator import (
     GeminiQuotaExceededError,
-    GroqQuotaExceededError,
     JobEvaluation,
     build_job_prompt,
     evaluate_job,
     evaluate_job_consensus,
-    evaluate_job_groq,
-    evaluate_with_consensus,
     groq_client,
     openrouter_client,
     query_model,
 )
-from filters import clean_html_text, is_spam_title
-from scrapers import collect_all, collect_all_async
+from filters import is_spam_title
 from scrapers.base import JobResult
 
 log = logging.getLogger("main")
@@ -245,151 +241,6 @@ class PipelineMetrics:
             if is_broad:
                 self.broad_gatekept += 1
 
-
-async def process_job(
-    job: JobResult,
-    semaphore: asyncio.Semaphore,
-    dry_run: bool,
-    session: aiohttp.ClientSession,
-    metrics: Optional[PipelineMetrics] = None,
-) -> None:
-    """Process a single scraped job through Layers 0, 1, 2, 4, persistence, and Discord alerting."""
-    # --- Layer 0: O(1) Deduplication against Turso ---
-    if await is_job_seen(url_or_id=job.url, title=job.title, company=job.company):
-        log.info("Layer 0: Skipped already-seen job '%s' @ %s", job.title, job.company)
-        if metrics:
-            await metrics.inc_seen()
-        return
-
-    # --- Layer 1: Regex Spam Filter ---
-    is_spam, spam_reason = is_spam_title(job.title)
-    if is_spam:
-        log.info("Layer 1: Discarded spam '%s' @ %s (%s)", job.title, job.company, spam_reason)
-        if metrics:
-            await metrics.inc_spam()
-        return
-
-    # --- Layer 2 & 4: Token Optimization + Concurrent Gemini LLM Evaluation ---
-    job_payload = {
-        "title": job.title,
-        "company": job.company,
-        "location": job.location,
-        "platform": job.platform,
-        "description": job.description,
-        "url": job.url,
-    }
-    try:
-        evaluation = await evaluate_job(job_payload, semaphore)
-    except GeminiQuotaExceededError:
-        if getattr(config, "OPENROUTER_API_KEY", None) and getattr(config, "GROQ_API_KEY", None):
-            evaluation = await evaluate_job_consensus(job_payload)
-        elif getattr(config, "GROQ_API_KEY", None):
-            try:
-                from groq import AsyncGroq
-                groq_client = AsyncGroq(api_key=config.GROQ_API_KEY)
-                evaluation = await evaluate_job_groq(job_payload, groq_client)
-            except Exception as e:
-                log.warning("Groq fallback in process_job failed: %s", e)
-                evaluation = None
-        else:
-            evaluation = None
-
-    if not evaluation:
-        log.warning("Evaluation failed or skipped for '%s' @ %s", job.title, job.company)
-        return
-
-    status_val = getattr(evaluation, "status", "active")
-    is_high_match = bool(evaluation.is_match)
-    job_id = title_company_hash(job.title, job.company)
-    record = {
-        "job_id": job_id,
-        "title": job.title,
-        "company": job.company,
-        "location": job.location,
-        "platform": job.platform,
-        "url": job.url,
-        "description": job.description,
-        "ai_score": getattr(evaluation, "match_score", None),
-        "visa_sponsorship": evaluation.visa_sponsorship,
-        "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "alert_sent": 0,
-        "status": status_val,
-        "tier": "strict",
-        "match_reason": getattr(evaluation, "match_reason", "") or "",
-    }
-
-    if dry_run:
-        log.info(
-            "[DRY RUN] Evaluated '%s' @ %s -> Match: %s, Status: %s",
-            job.title,
-            job.company,
-            evaluation.is_match,
-            status_val,
-        )
-        if metrics:
-            await metrics.inc_evaluated(
-                is_high_match=(is_high_match and status_val != "deferred"),
-                alerted=False,
-                is_deferred=(status_val == "deferred"),
-            )
-        return
-
-    # --- Persistence to Turso Cloud ---
-    saved = await add_job(record)
-    if saved:
-        log.info("Saved evaluated job to Turso: '%s' @ %s (status: %s)", job.title, job.company, status_val)
-
-    # --- Layer 5: Non-Blocking Discord Notification Engine ---
-    alert_delivered = False
-    if is_high_match and status_val != "deferred":
-        alert_delivered = await send_discord_alert_async(job_payload, evaluation, session=session)
-        if alert_delivered:
-            await mark_alert_sent(job_id)
-
-    if metrics:
-        await metrics.inc_evaluated(
-            is_high_match=(is_high_match and status_val != "deferred"),
-            alerted=alert_delivered,
-            is_deferred=(status_val == "deferred"),
-        )
-
-
-async def evaluate_with_gemini(
-    job_data: dict[str, Any],
-    semaphore: Optional[asyncio.Semaphore] = None,
-) -> Optional[JobEvaluation]:
-    """Helper to evaluate a job with Gemini and track call quota against MAX_GEMINI_CALLS_PER_RUN."""
-    global current_gemini_calls
-    current_gemini_calls += 1
-    return await evaluate_job(job_data, semaphore=semaphore)
-
-
-async def evaluate_strict_job(
-    job_data: dict[str, Any],
-    semaphore: Optional[asyncio.Semaphore] = None,
-) -> tuple[Optional[JobEvaluation], bool]:
-    """Evaluates strict job with Gemini first, falling back to Unanimous Junior Consensus if Gemini is unavailable."""
-    global current_gemini_calls
-    if current_gemini_calls < MAX_GEMINI_CALLS_PER_RUN:
-        try:
-            eval_res = await evaluate_with_gemini(job_data, semaphore=semaphore)
-            if eval_res:
-                return eval_res, False
-        except Exception as e:
-            log.warning("Gemini API unavailable: %s. Triggering Unanimous Junior Consensus...", e)
-    else:
-        log.warning("Gemini API call limit (%d) reached. Triggering Unanimous Junior Consensus...", MAX_GEMINI_CALLS_PER_RUN)
-
-    # Query both Junior models simultaneously
-    consensus_eval = await evaluate_job_consensus(job_data)
-    if consensus_eval.status == "consensus_passed":
-        log.info("Junior Consensus UNANIMOUS for '%s'.", job_data.get("title", ""))
-        reason = f"{getattr(consensus_eval, 'match_reason', '')} [Evaluated via Junior Consensus due to Gemini limit]".strip()
-        consensus_eval.match_reason = reason
-        return consensus_eval, True
-    else:
-        log.info("Junior Consensus failed to reach unanimous YES for '%s'. Parking job.", job_data.get("title", ""))
-        return consensus_eval, False
 
 
 async def run_scrapers_concurrently(
