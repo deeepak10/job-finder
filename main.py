@@ -48,7 +48,7 @@ from database import (
     title_company_hash,
     update_job_status,
 )
-from discord_alerts import send_discord_alert_async
+from discord_alerts import send_discord_alert_async, send_system_alert_async
 from evaluator import (
     GeminiQuotaExceededError,
     JobEvaluation,
@@ -131,6 +131,11 @@ def parse_args() -> argparse.Namespace:
         "--test-alert",
         action="store_true",
         help="Dispatch sample high-priority Discord alert to verify webhook integration.",
+    )
+    parser.add_argument(
+        "--run-gc",
+        action="store_true",
+        help="Run database garbage collection on rejected jobs older than 30 days and exit.",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -365,6 +370,10 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     print(f"[{_ts()}] >>> [Scraping Phase] END | Duration: {t_scrape_elapsed:.2f}s | Collected: {metrics.scraped} jobs")
 
     if not scraped_jobs:
+        log.error("Dead Silence Anomaly: All scrapers returned 0 jobs.")
+        await send_system_alert_async(
+            "CRITICAL: Scraping phase yielded 0 total jobs. Possible IP ban, CAPTCHA wall, or UI change on target job boards. Check Playwright logs."
+        )
         log.info("No scraped jobs to process. Exiting pipeline.")
         return
 
@@ -949,6 +958,18 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     print(f" * Jobs Deferred To Queue   : {metrics.deferred_added}")
     print(f" * Pending Groq Added       : {metrics.pending_groq_added}")
     print(f" * Execution Duration       : {total_elapsed:.2f}s")
+    # GARBAGE COLLECTION (Night Run Only)
+    current_hour_utc = datetime.now(timezone.utc).hour
+    # Executes during night runs (>= 14 UTC / 07:30 PM IST) to purge stale rejected payloads
+    if current_hour_utc >= 14 and not args.dry_run:
+        try:
+            from database import run_garbage_collection_async
+            cleared_gc = await run_garbage_collection_async()
+            if cleared_gc > 0:
+                log.info("Night Shift Garbage Collection: Cleared %d old rejected payloads.", cleared_gc)
+        except Exception as gc_err:
+            log.warning("Night shift garbage collection encountered an error: %s", gc_err)
+
     print("=" * 60 + "\n")
 
 
@@ -974,6 +995,12 @@ def main() -> None:
 
     if args.test_alert:
         asyncio.run(run_test_alert())
+        sys.exit(0)
+
+    if args.run_gc:
+        from database import run_garbage_collection
+        cleared = run_garbage_collection()
+        print(f"Garbage collection completed. Cleared payloads for {cleared} old rejected jobs.")
         sys.exit(0)
 
     try:

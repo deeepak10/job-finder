@@ -130,6 +130,9 @@ async def send_discord_alert_async(
     embed = build_discord_embed(job, evaluation)
     payload = {"embeds": [embed]}
 
+    # Anti-burst rate limit protection: 1.5 second sleep guarantees staying well below Discord limits
+    await asyncio.sleep(1.5)
+
     close_session = False
     if session is None:
         session = aiohttp.ClientSession()
@@ -173,6 +176,61 @@ def send_discord_alert(
             visa_sponsorship="Work authorization supported",
         )
     return asyncio.run(send_discord_alert_async(job, evaluation, webhook_url))
+
+
+async def send_system_alert_async(
+    message: str,
+    webhook_url: Optional[str] = None,
+    session: Optional[aiohttp.ClientSession] = None,
+) -> bool:
+    """Fires a red-colored embed to Discord if the pipeline experiences a critical anomaly."""
+    target_url = webhook_url or config.DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URL
+    if not target_url:
+        log.warning("DISCORD_WEBHOOK_URL not set; skipping system notification.")
+        return False
+
+    if not target_url.startswith(
+        ("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")
+    ):
+        log.error("Security alert: DISCORD_WEBHOOK_URL must point to official discord.com endpoints.")
+        return False
+
+    embed = {
+        "title": "⚠️ Pipeline Anomaly Detected",
+        "description": message,
+        "color": 16711680,  # Red
+        "footer": {"text": "Job Finder System Monitor"},
+    }
+    payload = {"embeds": [embed]}
+
+    close_session = False
+    if session is None:
+        session = aiohttp.ClientSession()
+        close_session = True
+
+    try:
+        async with session.post(target_url, json=payload, timeout=aiohttp.ClientTimeout(total=15, connect=5)) as resp:
+            if resp.status in (200, 204):
+                log.info("System alert delivered to Discord: %s", message[:100])
+                return True
+            else:
+                resp_text = await resp.text()
+                log.warning("System alert webhook returned HTTP %d: %s", resp.status, resp_text[:200])
+                return False
+    except Exception as exc:
+        log.error("Failed to send system alert to Discord: %s", exc)
+        return False
+    finally:
+        if close_session:
+            await session.close()
+
+
+def send_system_alert(
+    message: str,
+    webhook_url: Optional[str] = None,
+) -> bool:
+    """Synchronous helper wrapper around send_system_alert_async."""
+    return asyncio.run(send_system_alert_async(message, webhook_url))
 
 
 if __name__ == "__main__":

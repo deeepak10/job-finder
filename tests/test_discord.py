@@ -94,4 +94,23 @@ def test_main_imports_send_discord_alert_async():
     import main
     assert hasattr(main, "send_discord_alert_async")
     assert callable(main.send_discord_alert_async)
+    assert hasattr(main, "send_system_alert_async")
+    assert callable(main.send_system_alert_async)
+
+
+def test_send_system_alert_async():
+    import asyncio
+    from discord_alerts import send_system_alert_async
+
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 204
+        sent = asyncio.run(send_system_alert_async("Test failure alert", webhook_url="https://discord.com/api/webhooks/123/abc"))
+        assert sent is True
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args[1]
+        embed = call_kwargs["json"]["embeds"][0]
+        assert embed["color"] == 16711680
+        assert "Pipeline Anomaly Detected" in embed["title"]
+        assert "Test failure alert" in embed["description"]
+        assert embed["footer"]["text"] == "Job Finder System Monitor"
 

@@ -628,6 +628,67 @@ async def get_stats(client: Optional[AsyncTursoConnection] = None) -> dict[str, 
 
 
 # --------------------------------------------------------------------------
+# Maintenance & Garbage Collection
+# --------------------------------------------------------------------------
+
+async def run_garbage_collection_async(
+    client: Optional[AsyncTursoConnection] = None,
+) -> int:
+    """Nullifies heavy text fields for rejected jobs older than 30 days to save Turso storage."""
+    close_client = False
+    if client is None:
+        try:
+            client = get_turso_client()
+            close_client = True
+        except Exception as e:
+            log.warning("Could not connect to Turso for garbage collection: %s", e)
+            return 0
+
+    sql = """
+    UPDATE job_postings 
+    SET description = NULL, match_reason = NULL 
+    WHERE status = 'rejected' 
+      AND date_found < datetime('now', '-30 days');
+    """
+    try:
+        res = await client.execute_query(sql)
+        rows_affected = 0
+        if isinstance(res, dict) and res.get("results"):
+            for r in res.get("results", []):
+                resp = r.get("response", {})
+                result_obj = resp.get("result", {})
+                if "affected_row_count" in result_obj:
+                    rows_affected += result_obj.get("affected_row_count", 0)
+        elif isinstance(res, dict) and "rows_affected" in res:
+            rows_affected = res.get("rows_affected", 0)
+
+        if rows_affected > 0:
+            log.info("Garbage Collection: Cleared payloads for %d old rejected jobs.", rows_affected)
+        return rows_affected
+    except Exception as exc:
+        log.error("Database garbage collection failed: %s", exc)
+        return 0
+    finally:
+        if close_client and client and client.session:
+            await client.session.close()
+
+
+def run_garbage_collection() -> int:
+    """Synchronous adapter for run_garbage_collection_async."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(run_garbage_collection_async())).result()
+    else:
+        return asyncio.run(run_garbage_collection_async())
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 

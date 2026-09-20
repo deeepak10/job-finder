@@ -18,6 +18,8 @@ from scrapers.base import JobResult, clean, dedupe, sleep_jitter, valid_only
 
 log = logging.getLogger(__name__)
 
+__all__ = ["scrape", "scrape_async", "scrape_india", "scrape_global", "sleep_jitter"]
+
 PAGES_PER_LOCATION = 1          # Hardcoded max 1 page = 10 results per SerpApi credit
 MAX_RESULTS_PER_QUERY = 20     # Strict cap at top 20 latest results
 SERP_MIN_DELAY, SERP_MAX_DELAY = 1.0, 2.0

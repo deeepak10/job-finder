@@ -95,3 +95,24 @@ def test_add_job_sql_matches_lean_schema():
     assert "Some reasoning" not in args
     assert "Project A" not in args
     assert "Draft" not in args
+
+
+def test_garbage_collection_nullifies_old_rejected_jobs():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from database import run_garbage_collection_async
+
+    mock_client = MagicMock()
+    mock_client.execute_query = AsyncMock(
+        return_value={"results": [{"response": {"result": {"affected_row_count": 5}}}]}
+    )
+    mock_client.session = None
+
+    cleared = asyncio.run(run_garbage_collection_async(client=mock_client))
+    assert cleared == 5
+    mock_client.execute_query.assert_called_once()
+    sql = mock_client.execute_query.call_args[0][0]
+    assert "UPDATE job_postings" in sql
+    assert "SET description = NULL, match_reason = NULL" in sql
+    assert "status = 'rejected'" in sql
+    assert "date_found < datetime('now', '-30 days')" in sql
