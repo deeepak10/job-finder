@@ -354,6 +354,44 @@ async def process_job(
         )
 
 
+async def evaluate_with_gemini(
+    job_data: dict[str, Any],
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> Optional[JobEvaluation]:
+    """Helper to evaluate a job with Gemini and track call quota against MAX_GEMINI_CALLS_PER_RUN."""
+    global current_gemini_calls
+    current_gemini_calls += 1
+    return await evaluate_job(job_data, semaphore=semaphore)
+
+
+async def evaluate_strict_job(
+    job_data: dict[str, Any],
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> tuple[Optional[JobEvaluation], bool]:
+    """Evaluates strict job with Gemini first, falling back to Unanimous Junior Consensus if Gemini is unavailable."""
+    global current_gemini_calls
+    if current_gemini_calls < MAX_GEMINI_CALLS_PER_RUN:
+        try:
+            eval_res = await evaluate_with_gemini(job_data, semaphore=semaphore)
+            if eval_res:
+                return eval_res, False
+        except Exception as e:
+            log.warning("Gemini API unavailable: %s. Triggering Unanimous Junior Consensus...", e)
+    else:
+        log.warning("Gemini API call limit (%d) reached. Triggering Unanimous Junior Consensus...", MAX_GEMINI_CALLS_PER_RUN)
+
+    # Query both Junior models simultaneously
+    consensus_eval = await evaluate_job_consensus(job_data)
+    if consensus_eval.status == "consensus_passed":
+        log.info("Junior Consensus UNANIMOUS for '%s'.", job_data.get("title", ""))
+        reason = f"{getattr(consensus_eval, 'match_reason', '')} [Evaluated via Junior Consensus due to Gemini limit]".strip()
+        consensus_eval.match_reason = reason
+        return consensus_eval, True
+    else:
+        log.info("Junior Consensus failed to reach unanimous YES for '%s'. Parking job.", job_data.get("title", ""))
+        return consensus_eval, False
+
+
 async def run_scrapers_concurrently(
     args: Optional[argparse.Namespace] = None,
     current_hour_utc: Optional[int] = None,

@@ -114,8 +114,12 @@ async def scrape(headless: bool = True) -> list[JobResult]:
 
     results: list[JobResult] = []
     async with async_playwright() as pw:
+        import os
+        proxy_server = os.getenv("NAUKRI_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
+        proxy_config = {"server": proxy_server} if proxy_server else None
         browser = await pw.chromium.launch(
             headless=headless,
+            proxy=proxy_config,
             args=[
                 "--disable-http2",
                 "--disable-blink-features=AutomationControlled",

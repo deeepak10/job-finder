@@ -76,3 +76,14 @@ def scrape():
             return pool.submit(lambda: asyncio.run(scrape_async())).result()
     else:
         return asyncio.run(scrape_async())
+
+
+def scrape_adzuna(url: str, headers: dict = None):
+    """Synchronous helper checking status codes for 503 / 429 limits before parsing."""
+    import requests
+    response = requests.get(url, headers=headers)
+    if response.status_code == 503 or response.status_code == 429:
+        logger.warning(f"Adzuna API limit reached. Status: {response.status_code}. Skipping safely.")
+        return []
+    response.raise_for_status()
+    return response.json()
