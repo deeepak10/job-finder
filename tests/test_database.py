@@ -119,3 +119,32 @@ def test_garbage_collection_nullifies_old_rejected_jobs():
     assert "SET description = NULL, match_reason = NULL" in sql
     assert "status = 'rejected'" in sql
     assert "date_found < datetime('now', '-30 days')" in sql
+
+
+def test_add_job_parameter_alignment_and_category_fallbacks():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from database import add_job
+
+    mock_client = MagicMock()
+    mock_client.execute_query = AsyncMock(
+        return_value={"results": [{"response": {"result": {"affected_row_count": 1}}}]}
+    )
+    mock_client.session = None
+
+    # Job with missing/None optional fields and non-string category
+    minimal_job = {
+        "title": "Firmware Engineer",
+        "company": "MedTech Devices",
+        "platform": "naukri",
+        "url": "https://naukri.com/firmware",
+        "job_category": None,
+    }
+
+    success = asyncio.run(add_job(minimal_job, client=mock_client))
+    assert success is True
+    sql, args = mock_client.execute_query.call_args[0][0], mock_client.execute_query.call_args[0][1]
+    assert len(args) == 15
+    assert args[-1] == "General"  # Fallback from None to 'General'
+    assert args[3] == "Unknown"   # Location fallback
+

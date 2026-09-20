@@ -167,3 +167,33 @@ def test_multi_channel_discord_routing(sample_job, monkeypatch):
         assert mock_post.call_args[0][0] == "https://discord.com/api/webhooks/default/111"
 
 
+def test_multi_channel_discord_routing_safe_type_handling(sample_job, monkeypatch):
+    import asyncio
+    import config
+
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/default/111")
+    monkeypatch.setattr(config, "DISCORD_WEBHOOK_DEFAULT", "https://discord.com/api/webhooks/default/111")
+
+    # 1. When evaluation is a dict with job_category = None
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 200
+        res = asyncio.run(send_discord_alert_async(sample_job, {"is_match": True, "job_category": None}))
+        assert res is True
+        assert mock_post.call_args[0][0] == "https://discord.com/api/webhooks/default/111"
+
+    # 2. When evaluation has an unknown/unregistered category string
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 200
+        res = asyncio.run(send_discord_alert_async(sample_job, {"is_match": True, "job_category": "Quantum_Computing"}))
+        assert res is True
+        assert mock_post.call_args[0][0] == "https://discord.com/api/webhooks/default/111"
+
+    # 3. When evaluation has a non-string category (e.g. integer)
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 200
+        res = asyncio.run(send_discord_alert_async(sample_job, {"is_match": True, "job_category": 12345}))
+        assert res is True
+        assert mock_post.call_args[0][0] == "https://discord.com/api/webhooks/default/111"
+
+
+

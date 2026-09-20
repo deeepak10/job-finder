@@ -24,6 +24,16 @@ def test_job_evaluation_schema_validation():
     assert obj.job_category == "General"
 
 
+def test_job_evaluation_omitted_keys_use_safe_defaults():
+    # When LLM omits optional keys, model must instantiate safely without validation errors
+    obj = JobEvaluation.model_validate({"is_match": False})
+    assert obj.is_match is False
+    assert obj.visa_sponsorship == "Not Specified"
+    assert obj.match_reason == ""
+    assert obj.job_category == "General"
+    assert obj.status == "active"
+
+
 def test_system_prompt_contains_required_sections():
     assert "Diploma in Bio-Medical Engineering" in SYSTEM_INSTRUCTION
     assert "B.Tech in Electronics and Communication Engineering" in SYSTEM_INSTRUCTION

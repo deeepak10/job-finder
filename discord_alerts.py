@@ -74,13 +74,15 @@ def build_discord_embed(
         else getattr(evaluation, "visa_sponsorship", "Not Specified")
     )
 
-    category = "General"
+    raw_category = None
     if evaluation and isinstance(evaluation, dict):
-        category = evaluation.get("job_category") or "General"
+        raw_category = evaluation.get("job_category")
     elif hasattr(evaluation, "job_category"):
-        category = getattr(evaluation, "job_category", "General") or "General"
+        raw_category = getattr(evaluation, "job_category", None)
     elif job and isinstance(job, dict):
-        category = job.get("job_category") or "General"
+        raw_category = job.get("job_category")
+
+    category = raw_category.strip() if isinstance(raw_category, str) and raw_category.strip() else "General"
 
     fields = [
         {"name": "🏢 Company", "value": company, "inline": True},
@@ -139,13 +141,15 @@ async def send_discord_alert_async(
         return False
 
     # Extract category from the AI evaluation or fallback to General
-    category = "General"
+    raw_category = None
     if evaluation and isinstance(evaluation, dict):
-        category = evaluation.get("job_category") or "General"
+        raw_category = evaluation.get("job_category")
     elif hasattr(evaluation, "job_category"):
-        category = getattr(evaluation, "job_category", "General") or "General"
+        raw_category = getattr(evaluation, "job_category", None)
     elif job and isinstance(job, dict):
-        category = job.get("job_category") or "General"
+        raw_category = job.get("job_category")
+
+    category = raw_category.strip() if isinstance(raw_category, str) and raw_category.strip() else "General"
 
     # Map the AI's category to the specific webhook
     webhook_map = {
@@ -162,7 +166,11 @@ async def send_discord_alert_async(
     )
 
     # Specific argument takes top priority; otherwise route by category with default fallback
-    target_url = webhook_url or webhook_map.get(category) or default_webhook
+    target_webhook = webhook_map.get(category, default_webhook)
+    if not target_webhook:
+        target_webhook = default_webhook
+
+    target_url = webhook_url or target_webhook
     if not target_url:
         log.warning("No Discord Webhook configured. Cannot send alert.")
         return False

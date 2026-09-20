@@ -329,23 +329,31 @@ async def add_job(
     if missing:
         raise ValueError(f"Job is missing required field(s): {', '.join(missing)}")
 
-    title = job["title"].strip()
-    company = job["company"].strip()
-    url = job["url"].strip()
-    platform = job["platform"].strip().lower()
-    location = (job.get("location") or "").strip()
+    title = str(job["title"]).strip()
+    company = str(job["company"]).strip()
+    url = str(job["url"]).strip()
+    platform = str(job["platform"]).strip().lower()
+    raw_loc = job.get("location")
+    location = raw_loc.strip() if isinstance(raw_loc, str) else "Unknown"
 
     # Determine job_id: prefer hash(title + company) as primary identity
     job_id = job.get("job_id") or title_company_hash(title, company)
-    description = (job.get("description") or "").strip()
-    ai_score = job.get("ai_score")
-    visa_sponsorship = job.get("visa_sponsorship") or ""
+    raw_desc = job.get("description")
+    description = raw_desc.strip() if isinstance(raw_desc, str) else ""
+    raw_score = job.get("ai_score")
+    ai_score = int(raw_score) if isinstance(raw_score, (int, float)) else (0 if raw_score is not None else None)
+    raw_visa = job.get("visa_sponsorship")
+    visa_sponsorship = raw_visa.strip() if isinstance(raw_visa, str) else "Unknown"
     date_found = job.get("date_found") or datetime.now(timezone.utc).isoformat(timespec="seconds")
     alert_sent = int(bool(job.get("alert_sent", 0)))
-    status = (job.get("status") or "active").strip()
-    tier = (job.get("tier") or "strict").strip().lower()
-    match_reason = (job.get("match_reason") or "").strip()
-    job_category = (job.get("job_category") or "General").strip()
+    raw_status = job.get("status")
+    status = raw_status.strip() if isinstance(raw_status, str) else "active"
+    raw_tier = job.get("tier")
+    tier = raw_tier.strip().lower() if isinstance(raw_tier, str) else "strict"
+    raw_reason = job.get("match_reason")
+    match_reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
+    raw_category = job.get("job_category")
+    job_category = raw_category.strip() if isinstance(raw_category, str) and raw_category.strip() else "General"
 
     sql = """
     INSERT OR REPLACE INTO job_postings (

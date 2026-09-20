@@ -54,7 +54,8 @@ class JobEvaluation(BaseModel):
         description="Whether this job is a technical match for the candidate's cross-disciplinary profile"
     )
     visa_sponsorship: str = Field(
-        description="Concise extraction of work authorization, visa sponsorship, or relocation support status"
+        default="Not Specified",
+        description="Concise extraction of work authorization, visa sponsorship, or relocation support status",
     )
     ai_score: Optional[int] = Field(
         default=None,
