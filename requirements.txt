@@ -10,6 +10,7 @@ openai>=1.0.0
 
 # --- Scrapers (Native Async) ---
 playwright>=1.47.0            # Naukri (headless browser)
+playwright-stealth>=1.0.6     # Stealth evasions for headless Chromium
 apify-client>=1.7.1           # Wellfound via Apify actors
 requests>=2.32.3              # HTTP client fallback
 python-jobspy>=1.1.58         # LinkedIn guest scraper

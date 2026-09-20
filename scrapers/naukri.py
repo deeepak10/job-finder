@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -29,11 +30,13 @@ SELECTORS = {
         "div.srp-jobtuple-wrapper",
         "article.jobTuple",
         "div.cust-job-tuple",
+        "div.tuple",
+        "div[data-job-id]",
     ],
-    "title": ["a.title", "a.jobTupleHeader-title", "h2 a"],
-    "company": ["a.comp-name", "a.subTitle", "span.comp-name"],
-    "location": ["span.locWdth", "span.loc-wrap", "li.location"],
-    "snippet": ["span.job-desc", "div.job-description", "span.ellipsis.job-desc"],
+    "title": ["a.title", "a.jobTupleHeader-title", "h2 a", "a[class*='title']"],
+    "company": ["a.comp-name", "a.subTitle", "span.comp-name", "a[class*='comp-name']", "span[class*='comp-name']"],
+    "location": ["span.locWdth", "span.loc-wrap", "li.location", "span[class*='locWdth']", "span[class*='location']"],
+    "snippet": ["span.job-desc", "div.job-description", "span.ellipsis.job-desc", "div[class*='job-desc']"],
 }
 
 
@@ -65,6 +68,8 @@ def build_search_url(slug: str, keyword: str, page: int = 1) -> str:
 async def _scrape_page(page, url: str, tier: str = "strict") -> list[JobResult]:
     try:
         await page.goto(url, timeout=config.NAUKRI_TIMEOUT_MS, wait_until="domcontentloaded")
+        # Human-like delay after page load to bypass WAF behavioral profiling
+        await asyncio.sleep(random.uniform(2.5, 5.0))
     except Exception as exc:
         log.warning("naukri: page load timed out (30s) or failed for %s: %s — skipping", url, exc)
         return []
@@ -109,7 +114,13 @@ async def scrape(headless: bool = True) -> list[JobResult]:
 
     results: list[JobResult] = []
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=headless)
+        browser = await pw.chromium.launch(
+            headless=headless,
+            args=[
+                "--disable-http2",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
         context = await browser.new_context(
             viewport={"width": 1366, "height": 900},
             locale="en-IN",
@@ -122,6 +133,20 @@ async def scrape(headless: bool = True) -> list[JobResult]:
             },
         )
         page = await context.new_page()
+
+        # Apply stealth evasions to bypass Cloudflare/WAFs
+        try:
+            from playwright_stealth import Stealth
+            await Stealth().apply_stealth_async(page)
+            log.debug("naukri: playwright stealth evasions applied.")
+        except Exception:
+            try:
+                from playwright_stealth import stealth_async
+                await stealth_async(page)
+                log.debug("naukri: playwright stealth_async evasions applied.")
+            except Exception as s_exc:
+                log.warning("naukri: could not apply stealth evasions: %s", s_exc)
+
         page.set_default_timeout(config.NAUKRI_TIMEOUT_MS)
         page.set_default_navigation_timeout(config.NAUKRI_TIMEOUT_MS)
 

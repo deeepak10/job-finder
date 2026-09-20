@@ -68,6 +68,9 @@ from scrapers.base import JobResult
 
 log = logging.getLogger("main")
 
+MAX_GEMINI_CALLS_PER_RUN = 20
+current_gemini_calls = 0
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -527,29 +530,9 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     if not candidate_jobs:
         log.info("No fresh candidate jobs to evaluate after deduplication.")
 
-    # Check for deferred jobs to sweep and re-evaluate during morning run or explicit flag
-    current_hour_utc = datetime.now(timezone.utc).hour
-    is_morning_run = current_hour_utc <= 4
-    sweep_deferred = is_morning_run or getattr(args, "re_eval_deferred", False)
-    deferred_jobs_to_sweep: list[dict[str, Any]] = []
+    # Check for broad jobs pending Groq confirmation (Fallback Ambiguity Rule)
     pending_groq_to_sweep: list[dict[str, Any]] = []
-
     if not args.dry_run and config.TURSO_DATABASE_URL and config.TURSO_AUTH_TOKEN:
-        if sweep_deferred:
-            try:
-                pending_deferred = await get_deferred_jobs(limit=50)
-                if pending_deferred:
-                    log.info(
-                        "Morning run/flag detected: Swept %d deferred job(s) from Turso queue for Gemini executive tie-breaking.",
-                        len(pending_deferred),
-                    )
-                    print(f"[{_ts()}] [Executive Tie-Breaker] Swept {len(pending_deferred)} deferred job(s) for Gemini re-evaluation.")
-                    metrics.deferred_swept = len(pending_deferred)
-                    deferred_jobs_to_sweep = pending_deferred
-            except Exception as exc:
-                log.warning("Could not sweep deferred jobs from Turso: %s", exc)
-
-        # Check for broad jobs pending Groq confirmation (Fallback Ambiguity Rule)
         try:
             pending_groq = await get_pending_groq_jobs(limit=50)
             if pending_groq:
@@ -560,79 +543,28 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
         except Exception as exc:
             log.warning("Could not sweep pending_groq_verification jobs from Turso: %s", exc)
 
-    if not candidate_jobs and not deferred_jobs_to_sweep and not pending_groq_to_sweep:
-        log.info("No fresh candidate, deferred, or pending verification jobs to evaluate. Exiting pipeline.")
+    if not candidate_jobs and not pending_groq_to_sweep and not getattr(args, "re_eval_deferred", False):
+        log.info("No fresh candidate, pending verification, or explicit sweep jobs to evaluate. Exiting pipeline.")
         return
 
     # =========================================================================
-    # Phase 3: Tri-Model Evaluation Phase (Executive Tie-Breaker)
+    # Phase 3: Tri-Model Evaluation Phase (Executive Tie-Breaker & Quota Optimization)
     # =========================================================================
     t_eval_start = time.perf_counter()
     # Smart Quota Slicing: Process max 6 candidate jobs per run only when fallbacks are not configured
     if not getattr(config, "GROQ_API_KEY", None) and not getattr(config, "OPENROUTER_API_KEY", None):
         candidate_jobs = candidate_jobs[:6]
 
-    print(f"\n[{_ts()}] >>> [Tri-Model Evaluation Phase] START | Evaluating {len(candidate_jobs)} fresh jobs, {len(deferred_jobs_to_sweep)} deferred, {len(pending_groq_to_sweep)} pending Groq")
+    print(f"\n[{_ts()}] >>> [Tri-Model Evaluation Phase] START | Evaluating {len(candidate_jobs)} fresh jobs, {len(pending_groq_to_sweep)} pending Groq")
 
     semaphore = asyncio.Semaphore(1)
     gemini_quota_exhausted = False
+    global current_gemini_calls
+    current_gemini_calls = 0
 
     async with aiohttp.ClientSession() as session:
         # ---------------------------------------------------------------------
-        # Phase 3A.1: Deferred Queue Gemini Executive Tie-Breaker
-        # ---------------------------------------------------------------------
-        if deferred_jobs_to_sweep:
-            print(f"[{_ts()}] >>> [Executive Tie-Breaker] Evaluating {len(deferred_jobs_to_sweep)} deferred conflicts exclusively with Gemini")
-            for d_idx, d_job in enumerate(deferred_jobs_to_sweep, 1):
-                if gemini_quota_exhausted:
-                    log.info("Gemini quota exhausted; halting deferred tie-breaker sweep.")
-                    break
-                d_payload = {
-                    "title": d_job.get("title", ""),
-                    "company": d_job.get("company", ""),
-                    "location": d_job.get("location", ""),
-                    "platform": d_job.get("platform", "deferred"),
-                    "description": d_job.get("description", ""),
-                    "url": d_job.get("url", ""),
-                }
-                d_id = d_job.get("job_id") or title_company_hash(d_payload["title"], d_payload["company"])
-                log.info(
-                    "Executive Tie-Breaker %d/%d (Gemini): '%s' @ %s",
-                    d_idx, len(deferred_jobs_to_sweep), d_payload["title"], d_payload["company"],
-                )
-                try:
-                    eval_res = await evaluate_job(d_payload, semaphore)
-                    if eval_res:
-                        is_match = bool(eval_res.is_match)
-                        score = eval_res.match_score or 0
-                        new_status = "active" if is_match else "rejected"
-                        await update_job_status(
-                            job_id=d_id,
-                            status=new_status,
-                            ai_score=score,
-                            visa_sponsorship=eval_res.visa_sponsorship,
-                            match_reason=eval_res.match_reason,
-                        )
-                        alert_sent = False
-                        if is_match and score >= 70:
-                            alert_sent = await send_discord_alert_async(d_payload, eval_res, session=session)
-                            if alert_sent:
-                                await mark_alert_sent(d_id)
-                        await metrics.inc_evaluated(
-                            is_high_match=(is_match and score >= 70),
-                            alerted=alert_sent,
-                            is_rejected=(not is_match),
-                            is_strict=True,
-                        )
-                except GeminiQuotaExceededError:
-                    gemini_quota_exhausted = True
-                    log.warning("Gemini quota exhausted during executive tie-breaker sweep. Remaining jobs stay deferred.")
-                    break
-                except Exception as exc:
-                    log.error("Error during executive tie-break for '%s': %s", d_payload["title"], exc)
-
-        # ---------------------------------------------------------------------
-        # Phase 3A.2: Pending Groq Verification Sweep (Broad Ambiguity Rule)
+        # Phase 3A: Pending Groq Verification Sweep (Broad Ambiguity Rule)
         # ---------------------------------------------------------------------
         if pending_groq_to_sweep:
             print(f"[{_ts()}] >>> [Groq Verification Sweep] Verifying {len(pending_groq_to_sweep)} broad role(s) with Groq")
@@ -732,12 +664,17 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                     eval_index, total_candidates, job.title, job.company,
                 )
                 evaluation = None
-                if not gemini_quota_exhausted:
+                if current_gemini_calls < MAX_GEMINI_CALLS_PER_RUN and not gemini_quota_exhausted:
                     try:
+                        current_gemini_calls += 1
                         evaluation = await evaluate_job(job_payload, semaphore)
-                    except GeminiQuotaExceededError:
+                    except GeminiQuotaExceededError as q_err:
                         gemini_quota_exhausted = True
-                        log.warning("Gemini quota exhausted (429). Activating Junior Consensus for strict roles.")
+                        log.warning("Gemini API unavailable (%s). Triggering Unanimous Junior Consensus...", q_err)
+                    except Exception as gem_exc:
+                        log.warning("Gemini API unavailable (%s). Triggering Unanimous Junior Consensus...", gem_exc)
+                elif current_gemini_calls >= MAX_GEMINI_CALLS_PER_RUN:
+                    log.warning("Gemini run call limit (%d) reached. Triggering Unanimous Junior Consensus...", MAX_GEMINI_CALLS_PER_RUN)
 
                 if evaluation:
                     status_val = "active" if evaluation.is_match else "rejected"
@@ -772,14 +709,15 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                         is_strict=True,
                     )
                 else:
-                    # Fallback to Junior Consensus (Groq + OpenRouter)
-                    log.info("Route A Fallback: Querying Junior Consensus for '%s' @ %s", job.title, job.company)
+                    # Unanimous Junior Consensus for VIP Jobs
+                    log.info("Triggering Unanimous Junior Consensus for '%s' @ %s", job.title, job.company)
                     consensus_eval = await evaluate_job_consensus(job_payload)
                     c_status = consensus_eval.status
 
                     if c_status == "consensus_passed":
-                        # Both ACCEPTED
-                        log.info("Junior Consensus PASSED for '%s' @ %s", job.title, job.company)
+                        # MUST be unanimous to pass the Strict tier gate
+                        log.info("Junior Consensus UNANIMOUS for '%s' @ %s", job.title, job.company)
+                        reason = f"{getattr(consensus_eval, 'match_reason', '')} [Evaluated via Junior Consensus due to Gemini limit]".strip()
                         rec = {
                             "job_id": job_id,
                             "title": job.title,
@@ -794,7 +732,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "consensus_passed",
                             "tier": "strict",
-                            "match_reason": getattr(consensus_eval, "match_reason", "") or "Consensus passed",
+                            "match_reason": reason,
                         }
                         alert_delivered = False
                         if not args.dry_run:
@@ -803,33 +741,9 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             if alert_delivered:
                                 await mark_alert_sent(job_id)
                         await metrics.inc_evaluated(is_high_match=True, alerted=alert_delivered, is_strict=True)
-
-                    elif c_status == "consensus_failed":
-                        # Both REJECTED
-                        log.info("Junior Consensus REJECTED '%s' @ %s", job.title, job.company)
-                        rec = {
-                            "job_id": job_id,
-                            "title": job.title,
-                            "company": job.company,
-                            "location": job.location,
-                            "platform": job.platform,
-                            "url": job.url,
-                            "description": job.description,
-                            "ai_score": 0,
-                            "visa_sponsorship": "Rejected",
-                            "date_found": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                            "alert_sent": 0,
-                            "status": "rejected",
-                            "tier": "strict",
-                            "match_reason": getattr(consensus_eval, "match_reason", "") or "Consensus rejected",
-                        }
-                        if not args.dry_run:
-                            await add_job(rec)
-                        await metrics.inc_evaluated(is_high_match=False, alerted=False, is_rejected=True, is_strict=True)
-
                     else:
-                        # Split decision (conflict) or quota/model failure -> Defer to Gemini tie-breaker
-                        log.info("Junior Consensus CONFLICT/DEFERRED for '%s' @ %s. Parked for Gemini tie-breaker.", job.title, job.company)
+                        # If they disagree or say no, park it for the next run
+                        log.info("Junior Consensus failed to reach unanimous YES for '%s' @ %s. Parking job.", job.title, job.company)
                         rec = {
                             "job_id": job_id,
                             "title": job.title,
@@ -844,7 +758,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "deferred",
                             "tier": "strict",
-                            "match_reason": "Junior consensus conflict",
+                            "match_reason": "Junior Consensus failed to reach unanimous YES. Parked for Gemini.",
                         }
                         if not args.dry_run:
                             await add_job(rec)
@@ -1056,6 +970,71 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             await add_job(rec)
                         await metrics.inc_evaluated(is_high_match=False, alerted=False, is_deferred=True, is_broad=True)
 
+        # ---------------------------------------------------------------------
+        # Phase 3C: Dynamic Quota Sweeping
+        # ---------------------------------------------------------------------
+        remaining_quota = MAX_GEMINI_CALLS_PER_RUN - current_gemini_calls
+        if (remaining_quota > 0 or getattr(args, "re_eval_deferred", False)) and not gemini_quota_exhausted and not args.dry_run and config.TURSO_DATABASE_URL and config.TURSO_AUTH_TOKEN:
+            quota_to_fetch = max(remaining_quota, 20 if getattr(args, "re_eval_deferred", False) else 0)
+            log.info("Gemini quota remaining: %d. Sweeping deferred queue...", remaining_quota)
+            print(f"\n[{_ts()}] >>> [Dynamic Quota Sweep] Gemini quota remaining: {remaining_quota}. Sweeping deferred queue...")
+            try:
+                deferred_to_sweep = await get_deferred_jobs(limit=quota_to_fetch)
+                if deferred_to_sweep:
+                    log.info("Swept %d deferred job(s) from Turso queue for immediate Gemini evaluation.", len(deferred_to_sweep))
+                    print(f"[{_ts()}] [Dynamic Quota Sweep] Swept {len(deferred_to_sweep)} deferred job(s) for Gemini evaluation.")
+                    for d_idx, d_job in enumerate(deferred_to_sweep, 1):
+                        if gemini_quota_exhausted or (current_gemini_calls >= MAX_GEMINI_CALLS_PER_RUN and not getattr(args, "re_eval_deferred", False)):
+                            log.info("Gemini run call limit reached; stopping deferred sweep.")
+                            break
+                        d_payload = {
+                            "title": d_job.get("title", ""),
+                            "company": d_job.get("company", ""),
+                            "location": d_job.get("location", ""),
+                            "platform": d_job.get("platform", "deferred"),
+                            "description": d_job.get("description", ""),
+                            "url": d_job.get("url", ""),
+                        }
+                        d_id = d_job.get("job_id") or title_company_hash(d_payload["title"], d_payload["company"])
+                        log.info("Dynamic Deferred Sweep %d/%d (Gemini): '%s' @ %s", d_idx, len(deferred_to_sweep), d_payload["title"], d_payload["company"])
+                        try:
+                            current_gemini_calls += 1
+                            eval_res = await evaluate_job(d_payload, semaphore)
+                            if eval_res:
+                                is_match = bool(eval_res.is_match)
+                                score = eval_res.match_score or 0
+                                new_status = "active" if is_match else "rejected"
+                                await update_job_status(
+                                    job_id=d_id,
+                                    status=new_status,
+                                    ai_score=score,
+                                    visa_sponsorship=eval_res.visa_sponsorship,
+                                    match_reason=eval_res.match_reason,
+                                )
+                                alert_sent = False
+                                if is_match and score >= 70:
+                                    alert_sent = await send_discord_alert_async(d_payload, eval_res, session=session)
+                                    if alert_sent:
+                                        await mark_alert_sent(d_id)
+                                await metrics.inc_evaluated(
+                                    is_high_match=(is_match and score >= 70),
+                                    alerted=alert_sent,
+                                    is_rejected=(not is_match),
+                                    is_strict=True,
+                                )
+                                metrics.deferred_swept += 1
+                        except GeminiQuotaExceededError:
+                            gemini_quota_exhausted = True
+                            log.warning("Gemini quota exhausted during dynamic deferred sweep. Remaining jobs will wait for next run.")
+                            break
+                        except Exception as exc:
+                            log.error("Error during dynamic deferred sweep for '%s': %s", d_payload["title"], exc)
+            except Exception as sweep_exc:
+                log.warning("Could not complete dynamic deferred sweep: %s", sweep_exc)
+        else:
+            log.info("Gemini quota exhausted for this run (%d/%d calls). Remaining jobs will wait for the next run.",
+                     current_gemini_calls, MAX_GEMINI_CALLS_PER_RUN)
+
     t_eval_elapsed = time.perf_counter() - t_eval_start
     log.info("========== [Tri-Model Evaluation Phase] END (%s) | Duration: %.2fs | Evaluated: %d jobs ==========",
              _ts(), t_eval_elapsed, metrics.evaluated)
@@ -1068,7 +1047,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     print(" [PIPELINE RUN METRICS SUMMARY]")
     print("=" * 60)
     print(f" * Total Postings Collected : {metrics.scraped}")
-    print(f" * Deferred Swept (Morning) : {metrics.deferred_swept}")
+    print(f" * Deferred Swept (Dynamic) : {metrics.deferred_swept}")
     print(f" * Pending Groq Swept       : {metrics.pending_groq_swept}")
     print(f" * Layer 0 Skipped (Seen)   : {metrics.seen_skipped}")
     print(f" * Layer 1 Discarded (Spam) : {metrics.spam_discarded}")

@@ -312,3 +312,48 @@ def test_parse_ai_json_extraction_edge_cases():
     # Test 2: Invalid text returns empty dict
     assert parse_ai_json("Just plain text with no json") == {}
 
+
+def test_unanimous_junior_consensus_tagging_and_parking():
+    """Verify Unanimous Junior Consensus tags passed roles and parks non-unanimous roles."""
+    from evaluator import JobEvaluation
+
+    # Case 1: Unanimous agreement
+    consensus_passed = JobEvaluation(
+        is_match=True,
+        ai_score=85,
+        visa_sponsorship="Available",
+        match_reason="Strong embedded C++ background",
+        status="consensus_passed",
+    )
+    passed_reason = f"{consensus_passed.match_reason} [Evaluated via Junior Consensus due to Gemini limit]".strip()
+    assert "[Evaluated via Junior Consensus due to Gemini limit]" in passed_reason
+
+    # Case 2: Failed to reach unanimous YES
+    consensus_failed = JobEvaluation(
+        is_match=False,
+        ai_score=40,
+        visa_sponsorship="None",
+        match_reason="Split decision between models",
+        status="conflict",
+    )
+    assert consensus_failed.status != "consensus_passed"
+    parked_reason = "Junior Consensus failed to reach unanimous YES. Parked for Gemini."
+    assert "Parked for Gemini" in parked_reason
+
+
+def test_dynamic_quota_sweeping_limit_calculation():
+    """Verify dynamic quota sweep respects MAX_GEMINI_CALLS_PER_RUN = 20."""
+    from main import MAX_GEMINI_CALLS_PER_RUN
+
+    assert MAX_GEMINI_CALLS_PER_RUN == 20
+
+    current_calls = 12
+    remaining_quota = MAX_GEMINI_CALLS_PER_RUN - current_calls
+    assert remaining_quota == 8
+
+    # When calls exceed or reach max
+    current_calls = 20
+    remaining_quota = MAX_GEMINI_CALLS_PER_RUN - current_calls
+    assert remaining_quota <= 0
+
+

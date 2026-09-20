@@ -23,6 +23,9 @@ async def scrape_async():
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                if response.status in (503, 429):
+                    logger.warning(f"Adzuna API limit reached. Status: {response.status}. Skipping safely.")
+                    return []
                 if response.status != 200:
                     logger.warning(f"Adzuna API returned status {response.status} (limit or key error) — skipping safely.")
                     return []

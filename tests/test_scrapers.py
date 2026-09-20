@@ -495,8 +495,12 @@ def test_adzuna_parses_success_and_handles_errors(monkeypatch):
     assert jobs[0]["company"] == "HealthTech Labs"
     assert jobs[0]["source"] == "adzuna"
 
-    # Test error status (fail-open)
+    # Test error status (fail-open on 429 and 503)
     monkeypatch.setattr("aiohttp.ClientSession", lambda: MockSession(429, {}))
+    jobs = asyncio.run(adzuna.scrape_async())
+    assert jobs == []
+
+    monkeypatch.setattr("aiohttp.ClientSession", lambda: MockSession(503, {}))
     jobs = asyncio.run(adzuna.scrape_async())
     assert jobs == []
 
@@ -719,6 +723,57 @@ def test_workday_scraper_handles_network_error(monkeypatch):
 
     jobs = asyncio.run(workday.scrape_async())
     assert jobs == []
+
+
+def test_workday_scraper_handles_html_maintenance(monkeypatch):
+    """Verify workday.scrape_async gracefully ignores HTML maintenance responses."""
+    import asyncio
+    from scrapers import workday
+
+    class MockHtmlResponse:
+        status = 200
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def json(self):
+            raise ValueError("Unexpected mimetype: text/html")
+
+    class MockSession:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        def post(self, url, json=None, headers=None):
+            return MockHtmlResponse()
+
+    monkeypatch.setattr("aiohttp.ClientSession", MockSession)
+    jobs = asyncio.run(workday.scrape_async())
+    assert jobs == []
+
+
+def test_fetch_workday_jobs_helper(monkeypatch):
+    """Verify fetch_workday_jobs checks Content-Type header before parsing JSON."""
+    from scrapers import workday
+
+    class MockResponse:
+        def __init__(self, status_code, content_type, data):
+            self.status_code = status_code
+            self.headers = {"Content-Type": content_type}
+            self._data = data
+        def json(self):
+            return self._data
+
+    # Valid JSON
+    monkeypatch.setattr("requests.get", lambda url: MockResponse(200, "application/json", [{"id": "1"}]))
+    assert workday.fetch_workday_jobs("https://api.workday.com") == [{"id": "1"}]
+
+    # HTML Maintenance page
+    monkeypatch.setattr("requests.get", lambda url: MockResponse(200, "text/html", "<html>Maintenance</html>"))
+    assert workday.fetch_workday_jobs("https://api.workday.com") == []
 
 
 def test_run_scrapers_concurrently_morning_run(monkeypatch):
