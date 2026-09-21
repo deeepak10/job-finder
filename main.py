@@ -471,6 +471,8 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
             print(f"[{_ts()}] >>> [Groq Verification Sweep] Verifying {len(pending_groq_to_sweep)} broad role(s) with Groq")
             groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
             for p_idx, p_job in enumerate(pending_groq_to_sweep, 1):
+                # Client-Side Pacing (Anti-Burst): guarantees we stay under provider rate limits
+                await asyncio.sleep(2.0)
                 p_payload = {
                     "title": p_job.get("title", ""),
                     "company": p_job.get("company", ""),
@@ -547,6 +549,15 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
         # ---------------------------------------------------------------------
         total_candidates = len(candidate_jobs)
         for eval_index, job in enumerate(candidate_jobs, 1):
+            # Client-Side Pacing (Anti-Burst)
+            # 2.0 seconds guarantees we never exceed 30 Requests Per Minute on Groq/OpenRouter
+            await asyncio.sleep(2.0)
+
+            log.info(
+                "Evaluating candidate job %d/%d: '%s' @ %s",
+                eval_index, total_candidates, job.title, job.company,
+            )
+
             job_payload = {
                 "title": job.title,
                 "company": job.company,
@@ -568,15 +579,21 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                     eval_index, total_candidates, job.title, job.company,
                 )
                 evaluation = None
-                if current_gemini_calls < MAX_GEMINI_CALLS_PER_RUN and not gemini_quota_exhausted:
+                if gemini_quota_exhausted:
+                    # Circuit breaker is OPEN. Skip Gemini entirely and go straight to fallback.
+                    log.info("Circuit Breaker Active: Bypassing Gemini for '%s' @ %s", job.title, job.company)
+                elif current_gemini_calls < MAX_GEMINI_CALLS_PER_RUN:
                     try:
                         current_gemini_calls += 1
                         evaluation = await evaluate_job(job_payload, semaphore)
-                    except GeminiQuotaExceededError as q_err:
-                        gemini_quota_exhausted = True
-                        log.warning("Gemini API unavailable (%s). Triggering Unanimous Junior Consensus...", q_err)
                     except Exception as gem_exc:
-                        log.warning("Gemini API unavailable (%s). Triggering Unanimous Junior Consensus...", gem_exc)
+                        err_msg = str(gem_exc)
+                        # Trip the Circuit Breaker on 429 / Quota Exhaustion
+                        if "429" in err_msg or "quota" in err_msg.lower() or "RESOURCE_EXHAUSTED" in err_msg:
+                            log.warning("GEMINI QUOTA EXHAUSTED: Tripping global circuit breaker (%s).", gem_exc)
+                            gemini_quota_exhausted = True
+                        else:
+                            log.warning("Gemini API unavailable (%s). Triggering Unanimous Junior Consensus...", gem_exc)
                 elif current_gemini_calls >= MAX_GEMINI_CALLS_PER_RUN:
                     log.warning("Gemini run call limit (%d) reached. Triggering Unanimous Junior Consensus...", MAX_GEMINI_CALLS_PER_RUN)
 
@@ -900,8 +917,10 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                     print(f"[{_ts()}] [Dynamic Quota Sweep] Swept {len(deferred_to_sweep)} deferred job(s) for Gemini evaluation.")
                     for d_idx, d_job in enumerate(deferred_to_sweep, 1):
                         if gemini_quota_exhausted or (current_gemini_calls >= MAX_GEMINI_CALLS_PER_RUN and not getattr(args, "re_eval_deferred", False)):
-                            log.info("Gemini run call limit reached; stopping deferred sweep.")
+                            log.info("Gemini run call limit reached or circuit breaker active; stopping deferred sweep.")
                             break
+                        # Client-Side Pacing (Anti-Burst)
+                        await asyncio.sleep(2.0)
                         d_payload = {
                             "title": d_job.get("title", ""),
                             "company": d_job.get("company", ""),
@@ -945,6 +964,11 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             log.warning("Gemini quota exhausted during dynamic deferred sweep. Remaining jobs will wait for next run.")
                             break
                         except Exception as exc:
+                            err_msg = str(exc)
+                            if "429" in err_msg or "quota" in err_msg.lower() or "RESOURCE_EXHAUSTED" in err_msg:
+                                gemini_quota_exhausted = True
+                                log.warning("GEMINI QUOTA EXHAUSTED: Tripping global circuit breaker in sweep (%s).", exc)
+                                break
                             log.error("Error during dynamic deferred sweep for '%s': %s", d_payload["title"], exc)
             except Exception as sweep_exc:
                 log.warning("Could not complete dynamic deferred sweep: %s", sweep_exc)

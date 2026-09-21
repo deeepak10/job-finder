@@ -1,6 +1,7 @@
 # --- Core & Environment ---
 python-dotenv>=1.0.1
 pydantic>=2.10.0
+tenacity>=8.2.0
 
 # --- Cloud Database & AI Evaluation ---
 turso-python>=1.8

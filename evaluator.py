@@ -21,6 +21,7 @@ from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 try:
     from google.genai.errors import ServerError
@@ -532,13 +533,15 @@ openrouter_client = AsyncOpenAI(
 )
 
 
+# Reduce stop_after_attempt down to 3 and tune max wait time to 15s to fail gracefully rather than hanging
+@retry(wait=wait_exponential(multiplier=1.5, min=2, max=15), stop=stop_after_attempt(3), reraise=False)
 async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Optional[dict[str, Any]]:
     """Helper function to query an OpenAI-compatible endpoint safely and parse JSON response.
 
-    Features exponential backoff retry on HTTP 429 rate limit exceptions (up to 4 attempts)
+    Features exponential backoff retry on HTTP 429 rate limit exceptions (up to 3 attempts)
     and resilient regex-based JSON extraction.
     """
-    max_attempts = 4
+    max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
             response = await client.chat.completions.create(
@@ -566,7 +569,7 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
             code = getattr(e, "status_code", getattr(e, "code", None))
             is_rate_limit = code == 429 or "429" in exc_str or "rate_limit" in exc_str.lower()
             if is_rate_limit and attempt < max_attempts:
-                backoff = min(10.0, 1.5 ** attempt + 2.0)
+                backoff = min(15.0, 1.5 ** attempt + 2.0)
                 log.warning("Rate limit (429) hit on %s. Retrying in %.2fs (attempt %d/%d)...", model_name, backoff, attempt, max_attempts)
                 await asyncio.sleep(backoff)
                 continue

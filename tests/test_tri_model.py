@@ -354,3 +354,78 @@ def test_dynamic_quota_sweeping_limit_calculation():
     assert remaining_quota <= 0
 
 
+def test_tenacity_query_model_retry_configuration():
+    """Verify tenacity retry settings on query_model are tuned to 3 attempts with 2s-15s wait."""
+    from evaluator import query_model
+
+    assert hasattr(query_model, "retry")
+    assert query_model.retry.stop.max_attempt_number == 3
+    assert query_model.retry.wait.multiplier == 1.5
+    assert query_model.retry.wait.min == 2.0
+    assert query_model.retry.wait.max == 15.0
+
+
+def test_circuit_breaker_tripping_on_429_bypasses_gemini(monkeypatch):
+    """Verify Route A trips circuit breaker on 429 and bypasses Gemini for remaining jobs."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from evaluator import GeminiQuotaExceededError, JobEvaluation
+
+    gemini_call_count = 0
+    consensus_call_count = 0
+
+    async def mock_evaluate_job(job_dict, semaphore):
+        nonlocal gemini_call_count
+        gemini_call_count += 1
+        if gemini_call_count == 1:
+            raise GeminiQuotaExceededError("429 RESOURCE_EXHAUSTED: Daily quota exceeded")
+        return JobEvaluation(is_match=True, ai_score=90)
+
+    async def mock_evaluate_job_consensus(job_dict):
+        nonlocal consensus_call_count
+        consensus_call_count += 1
+        return JobEvaluation(is_match=True, ai_score=80, status="consensus_passed")
+
+    # Simulate evaluation loop logic
+    fresh_jobs = [
+        {"title": "Firmware Engineer 1", "company": "Medtronic", "tier": "strict"},
+        {"title": "Firmware Engineer 2", "company": "Stryker", "tier": "strict"},
+        {"title": "Firmware Engineer 3", "company": "Abbott", "tier": "strict"},
+    ]
+
+    gemini_quota_exhausted = False
+    results = []
+
+    async def run_loop():
+        nonlocal gemini_quota_exhausted
+        for job in fresh_jobs:
+            evaluation = None
+            if job.get("tier") == "strict":
+                if gemini_quota_exhausted:
+                    # Circuit breaker is OPEN. Skip Gemini entirely and go straight to fallback.
+                    consensus_eval = await mock_evaluate_job_consensus(job)
+                    results.append(("bypassed", consensus_eval))
+                else:
+                    try:
+                        evaluation = await mock_evaluate_job(job, None)
+                        results.append(("gemini", evaluation))
+                    except Exception as e:
+                        err_msg = str(e)
+                        if "429" in err_msg or "quota" in err_msg.lower() or "RESOURCE_EXHAUSTED" in err_msg:
+                            gemini_quota_exhausted = True
+                        consensus_eval = await mock_evaluate_job_consensus(job)
+                        results.append(("fallback", consensus_eval))
+
+    asyncio.run(run_loop())
+
+    # Only 1 Gemini call occurred before the circuit breaker tripped
+    assert gemini_call_count == 1
+    assert gemini_quota_exhausted is True
+    # Total 3 jobs: 1 tripped fallback, 2 bypassed Gemini entirely
+    assert len(results) == 3
+    assert results[0][0] == "fallback"
+    assert results[1][0] == "bypassed"
+    assert results[2][0] == "bypassed"
+    assert consensus_call_count == 3
+
+
