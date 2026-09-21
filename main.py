@@ -43,6 +43,7 @@ from database import (
     get_pending_groq_jobs,
     get_stats,
     init_db,
+    is_job_duplicate,
     is_job_seen,
     mark_alert_sent,
     title_company_hash,
@@ -411,7 +412,13 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
 
     try:
         async def check_seen(job: JobResult) -> Optional[JobResult]:
-            seen = await is_job_seen(url_or_id=job.url, title=job.title, company=job.company, client=turso_client)
+            seen = await is_job_seen(
+                url_or_id=job.url,
+                title=job.title,
+                company=job.company,
+                description=job.description,
+                client=turso_client,
+            )
             if seen:
                 log.info("Layer 0: Skipped already-seen job '%s' @ %s", job.title, job.company)
                 await metrics.inc_seen()

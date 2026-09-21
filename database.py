@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS job_postings (
     status              TEXT DEFAULT 'active',
     tier                TEXT DEFAULT 'strict',
     match_reason        TEXT DEFAULT '',
-    job_category        TEXT DEFAULT 'General'
+    job_category        TEXT DEFAULT 'General',
+    desc_hash           TEXT DEFAULT ''
 );
 """
 
@@ -57,6 +58,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_jobs_status ON job_postings (status);",
     "CREATE INDEX IF NOT EXISTS idx_jobs_tier ON job_postings (tier);",
     "CREATE INDEX IF NOT EXISTS idx_jobs_category ON job_postings (job_category);",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_desc_hash ON job_postings (desc_hash);",
 ]
 
 
@@ -153,13 +155,14 @@ async def init_db(client: Optional[AsyncTursoConnection] = None) -> None:
         for idx_sql in INDEXES:
             await client.execute_query(idx_sql)
 
-        # Ensure description, status, tier, match_reason, and job_category columns exist for schema migrations
+        # Ensure description, status, tier, match_reason, job_category, and desc_hash columns exist for schema migrations
         for col_def in (
             ("description", "TEXT"),
             ("status", "TEXT DEFAULT 'active'"),
             ("tier", "TEXT DEFAULT 'strict'"),
             ("match_reason", "TEXT DEFAULT ''"),
             ("job_category", "TEXT DEFAULT 'General'"),
+            ("desc_hash", "TEXT DEFAULT ''"),
         ):
             try:
                 await client.execute_query(f"ALTER TABLE job_postings ADD COLUMN {col_def[0]} {col_def[1]};")
@@ -241,17 +244,21 @@ async def is_job_seen(
     url_or_id: str = "",
     title: str = "",
     company: str = "",
+    description: str = "",
+    desc_hash: str = "",
     client: Optional[AsyncTursoConnection] = None,
 ) -> bool:
     """Execute Layer 0 O(1) deduplication check against Turso Cloud.
 
-    Queries the primary key (`job_id`) and indexed `url` column to determine
-    if a candidate job has already been evaluated or stored in prior runs.
+    Queries the primary key (`job_id`), indexed `url`, and indexed `desc_hash`
+    to determine if a candidate job has already been evaluated or stored in prior runs.
 
     Args:
         url_or_id: Job posting URL or pre-computed unique identifier.
         title: Job posting title (used with company to derive hash).
         company: Hiring organization name.
+        description: Raw job description text (used to compute desc_hash).
+        desc_hash: Optional pre-computed 16-hex description hash.
         client: Optional shared AsyncTursoConnection instance.
 
     Returns:
@@ -260,10 +267,17 @@ async def is_job_seen(
     clean_url = _strip_url(url_or_id) if url_or_id.startswith("http") else ""
     tc_hash = title_company_hash(title, company) if (title and company) else ""
     target_id = url_or_id if not clean_url else tc_hash
+    d_hash = desc_hash or (generate_desc_hash(description) if description else "")
 
-    # Look up by primary key or indexed URL
-    query = "SELECT 1 FROM job_postings WHERE url = ? OR job_id = ? OR job_id = ? LIMIT 1"
-    args = [clean_url or url_or_id, target_id or url_or_id, tc_hash or url_or_id]
+    if d_hash:
+        query = (
+            "SELECT 1 FROM job_postings "
+            "WHERE url = ? OR job_id = ? OR job_id = ? OR (desc_hash != '' AND desc_hash = ?) LIMIT 1"
+        )
+        args = [clean_url or url_or_id, target_id or url_or_id, tc_hash or url_or_id, d_hash]
+    else:
+        query = "SELECT 1 FROM job_postings WHERE url = ? OR job_id = ? OR job_id = ? LIMIT 1"
+        args = [clean_url or url_or_id, target_id or url_or_id, tc_hash or url_or_id]
 
     close_client = False
     if client is None:
@@ -280,6 +294,24 @@ async def is_job_seen(
     finally:
         if close_client and client.session:
             await client.session.close()
+
+
+async def is_job_duplicate(
+    job_id: str = "",
+    description: str = "",
+    url_or_id: str = "",
+    title: str = "",
+    company: str = "",
+    client: Optional[AsyncTursoConnection] = None,
+) -> bool:
+    """Checks O(1) existence via ID, URL, and Description Hash to catch recycled duplicates."""
+    return await is_job_seen(
+        url_or_id=url_or_id or job_id,
+        title=title,
+        company=company,
+        description=description,
+        client=client,
+    )
 
 
 async def is_new_job_async(
@@ -366,13 +398,20 @@ async def add_job(
     match_reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
     raw_category = job.get("job_category")
     job_category = raw_category.strip() if isinstance(raw_category, str) and raw_category.strip() else "General"
+    raw_desc_hash = job.get("desc_hash")
+    desc_hash = (
+        raw_desc_hash.strip()
+        if isinstance(raw_desc_hash, str) and raw_desc_hash.strip()
+        else generate_desc_hash(description)
+    )
 
     sql = """
     INSERT OR REPLACE INTO job_postings (
         job_id, title, company, location, platform, url,
         description, ai_score, visa_sponsorship, date_found,
-        alert_sent, status, tier, match_reason, job_category
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        alert_sent, status, tier, match_reason, job_category,
+        desc_hash
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     args = [
         job_id,
@@ -390,6 +429,7 @@ async def add_job(
         tier,
         match_reason,
         job_category,
+        desc_hash,
     ]
 
     close_client = False

@@ -1,10 +1,9 @@
-name: Unified Autonomous AI Job Pipeline (v2)
+name: Unified Autonomous AI Pipeline
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # 07:30 AM IST (Executes ALL scrapers)
-    - cron: '0 8 * * *'  # 01:30 PM IST (Executes Free scrapers only)
-    - cron: '0 14 * * *' # 07:30 PM IST (Executes Free scrapers only)
+    # Run 2x daily to conserve monthly CI/CD minutes
+    - cron: '0 2,14 * * *'
   workflow_dispatch:  # allow manual triggering
 
 permissions:
@@ -17,7 +16,9 @@ concurrency:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+
+    # Hard 15-Minute Timeout to kill stalled API dependencies
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository

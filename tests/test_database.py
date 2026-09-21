@@ -93,11 +93,12 @@ def test_add_job_sql_matches_lean_schema():
     assert "portfolio_highlight" not in sql
     assert "outreach_message" not in sql
     assert "job_category" in sql
-    assert len(args) == 15  # job_id, title, company, location, platform, url, description, ai_score, visa_sponsorship, date_found, alert_sent, status, tier, match_reason, job_category
+    assert "desc_hash" in sql
+    assert len(args) == 16  # job_id, title, company, location, platform, url, description, ai_score, visa_sponsorship, date_found, alert_sent, status, tier, match_reason, job_category, desc_hash
     assert "Some reasoning" not in args
     assert "Project A" not in args
     assert "Draft" not in args
-    assert args[-1] == "Biomedical_RD"
+    assert args[-2] == "Biomedical_RD"
 
 
 def test_garbage_collection_nullifies_old_rejected_jobs():
@@ -144,8 +145,8 @@ def test_add_job_parameter_alignment_and_category_fallbacks():
     success = asyncio.run(add_job(minimal_job, client=mock_client))
     assert success is True
     sql, args = mock_client.execute_query.call_args[0][0], mock_client.execute_query.call_args[0][1]
-    assert len(args) == 15
-    assert args[-1] == "General"  # Fallback from None to 'General'
+    assert len(args) == 16
+    assert args[-2] == "General"  # Fallback from None to 'General'
     assert args[3] == "Unknown"   # Location fallback
 
 
@@ -173,5 +174,41 @@ def test_generate_desc_hash_normalization_and_truncation():
     h_prefix1 = generate_desc_hash(base_prefix + " footer edit 12345")
     h_prefix2 = generate_desc_hash(base_prefix + " completely different company footer text")
     assert h_prefix1 == h_prefix2
+
+
+def test_is_job_duplicate_and_desc_hash_query():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from database import is_job_duplicate, is_job_seen, generate_desc_hash
+
+    mock_client = MagicMock()
+    mock_client.execute_query = AsyncMock(
+        return_value={
+            "results": [
+                {
+                    "type": "ok",
+                    "response": {
+                        "type": "execute",
+                        "result": {"rows": [[{"type": "integer", "value": 1}]]},
+                    },
+                }
+            ]
+        }
+    )
+    mock_client.session = None
+
+    desc = "Unique firmware job description for medical devices with telemetry."
+    expected_hash = generate_desc_hash(desc)
+
+    # 1. is_job_seen checks desc_hash when description is passed
+    seen = asyncio.run(is_job_seen(url_or_id="https://example.com/job1", title="Firmware", company="Stryker", description=desc, client=mock_client))
+    assert seen is True
+    query, args = mock_client.execute_query.call_args[0]
+    assert "desc_hash = ?" in query
+    assert expected_hash in args
+
+    # 2. is_job_duplicate calls is_job_seen and catches duplicate
+    dup = asyncio.run(is_job_duplicate(job_id="custom-id", description=desc, client=mock_client))
+    assert dup is True
 
 
