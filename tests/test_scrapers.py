@@ -649,8 +649,14 @@ def test_workday_scraper_success(monkeypatch):
     import asyncio
     from scrapers import workday
 
+    async def mock_sleep(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", mock_sleep)
+
     class MockPostResponse:
         status = 200
+        headers = {"Content-Type": "application/json"}
         async def __aenter__(self):
             return self
         async def __aexit__(self, *args):
@@ -668,6 +674,7 @@ def test_workday_scraper_success(monkeypatch):
 
     class MockGetResponse:
         status = 200
+        headers = {"Content-Type": "application/json"}
         async def __aenter__(self):
             return self
         async def __aexit__(self, *args):
@@ -694,20 +701,26 @@ def test_workday_scraper_success(monkeypatch):
     monkeypatch.setattr("aiohttp.ClientSession", MockSession)
 
     jobs = asyncio.run(workday.scrape_async())
-    # 2 tenants (Medtronic + Philips), 1 posting each
-    assert len(jobs) == 2
+    # 10 tenants, 1 unique posting each (deduped across keywords)
+    assert len(jobs) == len(workday.MEDTECH_WORKDAY_TENANTS)
     assert jobs[0]["title"] == "Principal Firmware Engineer"
     assert jobs[0]["company"] == "Medtronic"
     assert "medtronic.wd1.myworkdayjobs.com/en-US/External/job/" in jobs[0]["url"]
     assert jobs[0]["location"] == "Minneapolis, MN, United States"
     assert jobs[0]["description"] == "<p>Design firmware for implantable medical devices.</p>"
     assert jobs[0]["source"] == "Workday ATS"
+    assert jobs[0]["tier"] == "strict"
 
 
 def test_workday_scraper_handles_network_error(monkeypatch):
     """Verify workday.scrape_async handles network exceptions safely."""
     import asyncio
     from scrapers import workday
+
+    async def mock_sleep(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", mock_sleep)
 
     class MockCrashingSession:
         def __init__(self, *args, **kwargs):
@@ -730,6 +743,11 @@ def test_workday_scraper_handles_html_maintenance(monkeypatch):
     import asyncio
     from scrapers import workday
 
+    async def mock_sleep(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", mock_sleep)
+
     class MockHtmlResponse:
         status = 200
         headers = {"Content-Type": "text/html; charset=utf-8"}
@@ -749,6 +767,41 @@ def test_workday_scraper_handles_html_maintenance(monkeypatch):
             pass
         def post(self, url, json=None, headers=None):
             return MockHtmlResponse()
+
+    monkeypatch.setattr("aiohttp.ClientSession", MockSession)
+    jobs = asyncio.run(workday.scrape_async())
+    assert jobs == []
+
+
+def test_workday_scraper_handles_rate_limit_429(monkeypatch):
+    """Verify workday.scrape_async handles 429 rate limit by breaking keyword loop for tenant."""
+    import asyncio
+    from scrapers import workday
+
+    async def mock_sleep(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", mock_sleep)
+
+    class Mock429Response:
+        status = 429
+        headers = {"Content-Type": "application/json"}
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def json(self):
+            return {"error": "Rate limit exceeded"}
+
+    class MockSession:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        def post(self, url, json=None, headers=None):
+            return Mock429Response()
 
     monkeypatch.setattr("aiohttp.ClientSession", MockSession)
     jobs = asyncio.run(workday.scrape_async())
