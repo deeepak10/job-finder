@@ -207,6 +207,18 @@ def title_company_hash(title: str, company: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def generate_desc_hash(description: str) -> str:
+    """Creates a deterministic hash of the core job description."""
+    if not description or description == "Description not available.":
+        return ""
+
+    # Strip whitespace, punctuation, and lowercase to normalize
+    normalized = re.sub(r"[^a-z0-9]", "", description.lower())
+
+    # Hash only the first 500 characters to ensure speed and bypass minor footer edits
+    return hashlib.sha256(normalized[:500].encode("utf-8")).hexdigest()[:16]
+
+
 def make_job_id(platform: str, url: str = "", title: str = "", company: str = "") -> str:
     """Deterministic 16-character job ID.
 

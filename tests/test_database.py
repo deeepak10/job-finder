@@ -148,3 +148,30 @@ def test_add_job_parameter_alignment_and_category_fallbacks():
     assert args[-1] == "General"  # Fallback from None to 'General'
     assert args[3] == "Unknown"   # Location fallback
 
+
+def test_generate_desc_hash_normalization_and_truncation():
+    from database import generate_desc_hash
+
+    # Empty or default descriptions return empty string
+    assert generate_desc_hash("") == ""
+    assert generate_desc_hash("Description not available.") == ""
+
+    # Normalization: punctuation, whitespace, and case
+    desc1 = "Looking for an Embedded Firmware Engineer with C/C++ & RTOS experience!"
+    desc2 = "  looking for an embedded firmware engineer with c c++   rtos experience   "
+    h1 = generate_desc_hash(desc1)
+    h2 = generate_desc_hash(desc2)
+    assert len(h1) == 16
+    assert h1 == h2
+
+    # Different text yields different hash
+    h3 = generate_desc_hash("Looking for a Python Django backend developer.")
+    assert h1 != h3
+
+    # First 500 characters determines hash; changes beyond 500 chars do not alter hash
+    base_prefix = "a" * 500
+    h_prefix1 = generate_desc_hash(base_prefix + " footer edit 12345")
+    h_prefix2 = generate_desc_hash(base_prefix + " completely different company footer text")
+    assert h_prefix1 == h_prefix2
+
+
