@@ -3,6 +3,7 @@ import logging
 from typing import Any
 from urllib.parse import urlsplit
 import aiohttp
+from aiohttp import ClientTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,10 @@ async def scrape_workday_async() -> list[dict[str, Any]]:
     jobs_collected: list[dict[str, Any]] = []
     seen_urls = set()  # Prevent duplicate ingestion if multiple keywords match the same job
 
-    async with aiohttp.ClientSession() as session:
+    # Strict 15-second network timeout to prevent silent pipeline hangs
+    timeout = ClientTimeout(total=15)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         for company in MEDTECH_WORKDAY_TENANTS:
             search_url = f"{company['url']}/jobs"
 
@@ -128,6 +132,9 @@ async def scrape_workday_async() -> list[dict[str, Any]]:
                                 "source": "Workday ATS",
                                 "tier": "strict",
                             })
+                except asyncio.TimeoutError:
+                    logger.warning(f"Workday Timeout: {company['name']} hung on keyword '{keyword}'. Skipping.")
+                    continue
                 except Exception as e:
                     logger.error(f"Failed to scrape Workday for {company['name']} with keyword '{keyword}': {e}")
 

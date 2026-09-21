@@ -808,6 +808,31 @@ def test_workday_scraper_handles_rate_limit_429(monkeypatch):
     assert jobs == []
 
 
+def test_workday_scraper_handles_timeout(monkeypatch):
+    """Verify workday.scrape_async cleanly catches asyncio.TimeoutError and continues."""
+    import asyncio
+    from scrapers import workday
+
+    async def mock_sleep(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", mock_sleep)
+
+    class MockTimeoutSession:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        def post(self, url, json=None, headers=None):
+            raise asyncio.TimeoutError("Connection timed out after 15s")
+
+    monkeypatch.setattr("aiohttp.ClientSession", MockTimeoutSession)
+    jobs = asyncio.run(workday.scrape_async())
+    assert jobs == []
+
+
 def test_fetch_workday_jobs_helper(monkeypatch):
     """Verify fetch_workday_jobs checks Content-Type header before parsing JSON."""
     from scrapers import workday

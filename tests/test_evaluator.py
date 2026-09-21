@@ -629,5 +629,53 @@ def test_multi_provider_waterfall_simulation(monkeypatch):
     assert evaluated[1] == ("Job 2", "groq")
 
 
+def test_evaluate_job_with_model_rotation_circuit_breaker_and_pacing(monkeypatch):
+    """Verify evaluate_job_with_model_rotation paces 2.0s, trips breaker on 429, and fails over."""
+    import asyncio
+    import evaluator
+    from evaluator import evaluate_job_with_model_rotation, JobEvaluation
+
+    sleep_calls = []
+
+    async def mock_sleep(secs):
+        sleep_calls.append(secs)
+
+    monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+
+    # Reset circuit breaker
+    monkeypatch.setattr(evaluator, "GEMINI_QUOTA_EXHAUSTED", False)
+
+    # Mock evaluate_with_gemini to throw 429 on first job
+    call_count = 0
+
+    async def mock_gemini(job):
+        nonlocal call_count
+        call_count += 1
+        raise Exception("429 RESOURCE_EXHAUSTED: quota exceeded")
+
+    monkeypatch.setattr(evaluator, "evaluate_with_gemini", mock_gemini)
+
+    # Mock evaluate_job_consensus to return consensus evaluation
+    async def mock_consensus(job):
+        return JobEvaluation(is_match=True, ai_score=85, status="consensus_passed")
+
+    monkeypatch.setattr(evaluator, "evaluate_job_consensus", mock_consensus)
+
+    job1 = {"title": "Biomedical Firmware Engineer", "tier": "strict"}
+    res1 = asyncio.run(evaluate_job_with_model_rotation(job1))
+
+    assert res1.is_match is True
+    assert res1.status == "consensus_passed"
+    assert evaluator.GEMINI_QUOTA_EXHAUSTED is True
+    assert 2.0 in sleep_calls
+
+    # Second job should instantly bypass Gemini
+    job2 = {"title": "Embedded IoT Engineer", "tier": "strict"}
+    res2 = asyncio.run(evaluate_job_with_model_rotation(job2))
+    assert res2.is_match is True
+    assert call_count == 1  # Gemini was bypassed on second job
+
+
+
 
 

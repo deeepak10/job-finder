@@ -34,6 +34,10 @@ from filters import clean_and_truncate_text
 
 log = logging.getLogger(__name__)
 
+# Global Circuit Breaker for Gemini Free Tier
+GEMINI_QUOTA_EXHAUSTED = False
+
+
 class GeminiQuotaExceededError(Exception):
     """Raised when Gemini API daily quota or rate limit is exhausted (429 RESOURCE_EXHAUSTED)."""
     pass
@@ -313,23 +317,54 @@ GROQ_FALLBACK_MODELS: list[str] = [
 ]
 
 
-async def evaluate_job_with_model_rotation(prompt: str, groq_client: Any) -> Any:
-    """Attempt to evaluate a job description using Groq models in prioritized order.
+async def evaluate_with_gemini(job: dict[str, Any]) -> Optional[JobEvaluation]:
+    """Evaluate a single job dictionary with Gemini under a local semaphore."""
+    sem = asyncio.Semaphore(1)
+    return await evaluate_job(job, sem)
 
-    Automatically rotates to the next model if a 404 model_not_found error is thrown.
-    Raises non-404 errors (such as 429 rate limit or authentication errors) immediately.
 
-    Args:
-        prompt: Formatted and token-optimized prompt string.
-        groq_client: Initialized AsyncGroq client instance.
+async def evaluate_job_with_model_rotation(
+    job_or_prompt: Any,
+    groq_client: Any = None,
+) -> Any:
+    """Evaluate candidate job with 2s pacing and circuit breaker fallback, or rotate Groq models.
 
-    Returns:
-        Groq chat completion response object.
-
-    Raises:
-        GroqQuotaExceededError: If Groq returns HTTP 429 or rate limit exhaustion.
-        Exception: If all fallback models fail or if a non-404 exception occurs.
+    If job_or_prompt is a dict, operates as the top-level paced AI router.
+    If job_or_prompt is a str, operates as the internal Groq model rotation handler.
     """
+    global GEMINI_QUOTA_EXHAUSTED
+    if isinstance(job_or_prompt, dict):
+        job = job_or_prompt
+        # 2-Second Client-Side Pacing: Protects Groq and OpenRouter from concurrent burst limit 429s
+        await asyncio.sleep(2.0)
+
+        # Hard Circuit Breaker Check
+        if GEMINI_QUOTA_EXHAUSTED:
+            log.info("Gemini circuit breaker open. Instantly routing '%s' to Junior Consensus.", job.get("title", ""))
+            return await evaluate_job_consensus(job)
+
+        # Route A (Strict) primary Gemini evaluation
+        if job.get("tier") == "strict":
+            try:
+                eval_res = await evaluate_with_gemini(job)
+                if eval_res is not None:
+                    return eval_res
+                log.warning("Gemini failed for '%s'. Falling back to Junior Consensus.", job.get("title", ""))
+                return await evaluate_job_consensus(job)
+            except Exception as e:
+                error_str = str(e)
+                # Detect 429 Quota Exhaustion & Trip Breaker
+                if "429" in error_str or "resource_exhausted" in error_str.lower() or "quota" in error_str.lower():
+                    log.warning("GEMINI QUOTA EXHAUSTED: Tripping global circuit breaker.")
+                    GEMINI_QUOTA_EXHAUSTED = True
+
+                log.warning("Gemini failed for '%s' (%s). Falling back to Junior Consensus.", job.get("title", ""), e)
+                return await evaluate_job_consensus(job)
+
+        # Route B (Broad)
+        return await evaluate_job_consensus(job)
+
+    prompt = str(job_or_prompt)
     last_exception = None
 
     for model_name in GROQ_FALLBACK_MODELS:
@@ -471,6 +506,11 @@ async def evaluate_job(
     company = job_dict.get("company", "")
     prompt = build_job_prompt(job_dict)
 
+    global GEMINI_QUOTA_EXHAUSTED
+    if GEMINI_QUOTA_EXHAUSTED:
+        log.info("Gemini circuit breaker open. Skipping Gemini for '%s' @ %s", title, company)
+        raise GeminiQuotaExceededError("Gemini circuit breaker is open (quota previously exhausted)")
+
     async with semaphore:
         log.info("Evaluating with Gemini: '%s' @ %s", title, company)
         timeout_sec = getattr(config, "GEMINI_TIMEOUT_SECONDS", 45.0)
@@ -495,6 +535,7 @@ async def evaluate_job(
             )
             return None
         except GeminiQuotaExceededError:
+            GEMINI_QUOTA_EXHAUSTED = True
             # Propagate quota exhaustion so pipeline evaluation loop can break immediately
             raise
         except Exception as exc:
@@ -578,7 +619,7 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
 
 
 async def evaluate_with_consensus(
-    prompt: str,
+    prompt: Any,
     groq_cli: Optional[AsyncOpenAI] = None,
     router_cli: Optional[AsyncOpenAI] = None,
 ) -> dict[str, Any]:
@@ -586,6 +627,9 @@ async def evaluate_with_consensus(
 
     If models disagree or fail, defaults to deferred status for next-day batch processing.
     """
+    if isinstance(prompt, dict):
+        prompt = build_job_prompt(prompt)
+
     g_client = groq_cli or groq_client
     r_client = router_cli or openrouter_client
 
