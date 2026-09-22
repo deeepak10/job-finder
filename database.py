@@ -23,6 +23,7 @@ from turso_python import AsyncTursoConnection
 from turso_python.response_parser import TursoResponseParser
 
 import config
+from filters import extract_anchored_description, generate_desc_hash
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +48,8 @@ CREATE TABLE IF NOT EXISTS job_postings (
     tier                TEXT DEFAULT 'strict',
     match_reason        TEXT DEFAULT '',
     job_category        TEXT DEFAULT 'General',
-    desc_hash           TEXT DEFAULT ''
+    desc_hash           TEXT DEFAULT '',
+    retry_count         INTEGER DEFAULT 0
 );
 """
 
@@ -59,6 +61,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_jobs_tier ON job_postings (tier);",
     "CREATE INDEX IF NOT EXISTS idx_jobs_category ON job_postings (job_category);",
     "CREATE INDEX IF NOT EXISTS idx_jobs_desc_hash ON job_postings (desc_hash);",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_retries ON job_postings (retry_count);",
 ]
 
 
@@ -136,9 +139,9 @@ def parse_turso_rows(response: dict[str, Any]) -> list[dict[str, Any]]:
 async def init_db(client: Optional[AsyncTursoConnection] = None) -> None:
     """Initialize the Turso database schema and secondary indexes idempotently.
 
-    Creates the `job_postings` table and performance indexes (`idx_jobs_url`,
-    `idx_jobs_date_found`, `idx_jobs_score`) if they do not exist. Cleans up
-    legacy columns from prior schema iterations.
+    Creates the `job_postings` table and performance indexes if they do not exist.
+    Heavy DDL column migrations are deferred to run_schema_migrations() to prevent
+    startup roundtrip latency and Turso rate limit bloat.
 
     Args:
         client: Optional shared AsyncTursoConnection. If omitted, a scoped client is
@@ -154,8 +157,27 @@ async def init_db(client: Optional[AsyncTursoConnection] = None) -> None:
         await client.execute_query(SCHEMA)
         for idx_sql in INDEXES:
             await client.execute_query(idx_sql)
+        log.info("Turso database initialized successfully.")
+    finally:
+        if close_client and client.session:
+            await client.session.close()
 
-        # Ensure description, status, tier, match_reason, job_category, and desc_hash columns exist for schema migrations
+
+async def run_schema_migrations(client: Optional[AsyncTursoConnection] = None) -> None:
+    """Run non-blocking ALTER TABLE and cleanup migrations on demand.
+
+    Separated from init_db() to eliminate 9 sequential DDL round-trips on pipeline boot.
+
+    Args:
+        client: Optional shared AsyncTursoConnection.
+    """
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        log.info("Running Turso schema migrations...")
         for col_def in (
             ("description", "TEXT"),
             ("status", "TEXT DEFAULT 'active'"),
@@ -163,6 +185,7 @@ async def init_db(client: Optional[AsyncTursoConnection] = None) -> None:
             ("match_reason", "TEXT DEFAULT ''"),
             ("job_category", "TEXT DEFAULT 'General'"),
             ("desc_hash", "TEXT DEFAULT ''"),
+            ("retry_count", "INTEGER DEFAULT 0"),
         ):
             try:
                 await client.execute_query(f"ALTER TABLE job_postings ADD COLUMN {col_def[0]} {col_def[1]};")
@@ -178,7 +201,7 @@ async def init_db(client: Optional[AsyncTursoConnection] = None) -> None:
             except Exception:
                 pass
 
-        log.info("Turso database initialized successfully.")
+        log.info("Turso schema migrations completed.")
     finally:
         if close_client and client.session:
             await client.session.close()
@@ -210,16 +233,9 @@ def title_company_hash(title: str, company: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def generate_desc_hash(description: str) -> str:
-    """Creates a deterministic hash of the core job description."""
-    if not description or description == "Description not available.":
-        return ""
+# Note: generate_desc_hash and extract_anchored_description are imported from filters
+# to ensure semantic section anchoring (e.g. Qualifications/Requirements) across the pipeline.
 
-    # Strip whitespace, punctuation, and lowercase to normalize
-    normalized = re.sub(r"[^a-z0-9]", "", description.lower())
-
-    # Hash only the first 500 characters to ensure speed and bypass minor footer edits
-    return hashlib.sha256(normalized[:500].encode("utf-8")).hexdigest()[:16]
 
 
 def make_job_id(platform: str, url: str = "", title: str = "", company: str = "") -> str:
@@ -345,29 +361,132 @@ is_new_job_sync = is_new_job
 
 
 # --------------------------------------------------------------------------
+# Dedicated Async Database Writer Queue (Prevents SQLite Lockouts)
+# --------------------------------------------------------------------------
+
+class DatabaseWriteOp:
+    """Represents an asynchronous database write operation queued for the worker."""
+    def __init__(self, op_type: str, data: Any, future: asyncio.Future):
+        self.op_type = op_type
+        self.data = data
+        self.future = future
+
+
+class AsyncDatabaseWriter:
+    """Funnels all asynchronous inserts/updates through a single dedicated worker
+    to eliminate concurrent write lockouts on SQLite / Turso."""
+
+    def __init__(self, client: AsyncTursoConnection):
+        self.client = client
+        self.queue: asyncio.Queue[Optional[DatabaseWriteOp]] = asyncio.Queue()
+        self.task: Optional[asyncio.Task] = None
+        self._running = False
+
+    def start(self) -> None:
+        if not self._running:
+            self._running = True
+            self.task = asyncio.create_task(self._worker())
+            log.info("AsyncDatabaseWriter queue worker started.")
+
+    async def _worker(self) -> None:
+        while self._running:
+            item = await self.queue.get()
+            if item is None:
+                self.queue.task_done()
+                break
+            op_type = item.op_type
+            data = item.data
+            fut = item.future
+            try:
+                if op_type == "add_job":
+                    res = await _execute_add_job(data, self.client)
+                    if not fut.done():
+                        fut.set_result(res)
+                elif op_type == "update_status":
+                    res = await _execute_update_job_status(
+                        job_id=data["job_id"],
+                        status=data["status"],
+                        ai_score=data.get("ai_score"),
+                        visa_sponsorship=data.get("visa_sponsorship"),
+                        alert_sent=data.get("alert_sent"),
+                        tier=data.get("tier"),
+                        match_reason=data.get("match_reason"),
+                        job_category=data.get("job_category"),
+                        client=self.client,
+                    )
+                    if not fut.done():
+                        fut.set_result(res)
+                elif op_type == "mark_alert_sent":
+                    await _execute_mark_alert_sent(data, self.client)
+                    if not fut.done():
+                        fut.set_result(True)
+                elif op_type == "bulk_park":
+                    res = await _execute_bulk_park_jobs(data["jobs"], data["reason"], self.client)
+                    if not fut.done():
+                        fut.set_result(res)
+                else:
+                    if not fut.done():
+                        fut.set_result(False)
+            except Exception as exc:
+                log.error("AsyncDatabaseWriter worker failed processing %s: %s", op_type, exc)
+                if not fut.done():
+                    fut.set_exception(exc)
+            finally:
+                self.queue.task_done()
+
+    async def submit(self, op_type: str, data: Any) -> Any:
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        op = DatabaseWriteOp(op_type, data, fut)
+        await self.queue.put(op)
+        return await fut
+
+    async def close(self) -> None:
+        if self._running:
+            self._running = False
+            await self.queue.put(None)
+            if self.task:
+                await self.task
+            log.info("AsyncDatabaseWriter queue drained and stopped.")
+
+    stop = close
+    drain_and_stop = close
+
+
+_GLOBAL_DB_WRITER: Optional[AsyncDatabaseWriter] = None
+
+
+def get_active_db_writer() -> Optional[AsyncDatabaseWriter]:
+    """Retrieve current running AsyncDatabaseWriter instance, if any."""
+    return _GLOBAL_DB_WRITER
+
+
+def start_db_writer(client: AsyncTursoConnection) -> AsyncDatabaseWriter:
+    """Start the dedicated global database writer worker."""
+    global _GLOBAL_DB_WRITER
+    if _GLOBAL_DB_WRITER is None or not _GLOBAL_DB_WRITER._running:
+        _GLOBAL_DB_WRITER = AsyncDatabaseWriter(client)
+        _GLOBAL_DB_WRITER.start()
+    return _GLOBAL_DB_WRITER
+
+
+async def stop_db_writer() -> None:
+    """Drain and cleanly shutdown the global database writer worker."""
+    global _GLOBAL_DB_WRITER
+    if _GLOBAL_DB_WRITER is not None:
+        await _GLOBAL_DB_WRITER.close()
+        _GLOBAL_DB_WRITER = None
+
+
+# --------------------------------------------------------------------------
 # Insert & Update Operations
 # --------------------------------------------------------------------------
 
-async def add_job(
+async def _execute_add_job(
     job: dict[str, Any],
     client: Optional[AsyncTursoConnection] = None,
 ) -> bool:
-    """Persist an evaluated job posting record into Turso Cloud SQLite.
-
-    Inserts or updates the job posting with its metadata, AI match score,
-    visa sponsorship status, and alert state.
-
-    Args:
-        job: Dictionary containing job fields: title, company, platform, url,
-            and optional location, ai_score, visa_sponsorship, date_found.
-        client: Optional shared AsyncTursoConnection instance.
-
-    Returns:
-        True if the record was inserted/updated successfully, False otherwise.
-
-    Raises:
-        ValueError: If any mandatory field (title, company, platform, url) is missing.
-    """
+    """Internal implementation to persist an evaluated job posting record into Turso Cloud SQLite."""
     required = ("title", "company", "platform", "url")
     missing = [k for k in required if not job.get(k)]
     if missing:
@@ -380,7 +499,6 @@ async def add_job(
     raw_loc = job.get("location")
     location = raw_loc.strip() if isinstance(raw_loc, str) else "Unknown"
 
-    # Determine job_id: prefer hash(title + company) as primary identity
     job_id = job.get("job_id") or title_company_hash(title, company)
     raw_desc = job.get("description")
     description = raw_desc.strip() if isinstance(raw_desc, str) else ""
@@ -439,7 +557,6 @@ async def add_job(
 
     try:
         res = await client.execute_query(sql, args)
-        # Check affected row count
         if res.get("results") and res["results"][0].get("response"):
             result_meta = res["results"][0]["response"].get("result", {})
             return result_meta.get("affected_row_count", 0) > 0
@@ -452,11 +569,201 @@ async def add_job(
             await client.session.close()
 
 
+async def add_job(
+    job: dict[str, Any],
+    client: Optional[AsyncTursoConnection] = None,
+) -> bool:
+    """Persist an evaluated job posting record into Turso Cloud SQLite.
+    
+    Funnels through dedicated AsyncDatabaseWriter queue when active to prevent write locks.
+    """
+    writer = get_active_db_writer()
+    if client is None and writer is not None and writer._running:
+        return await writer.submit("add_job", job)
+    return await _execute_add_job(job, client)
+
+
+async def _execute_bulk_park_jobs(
+    jobs: list[Any],
+    reason: str = "Ensemble circuit breaker triggered",
+    client: Optional[AsyncTursoConnection] = None,
+) -> int:
+    """Bulk park jobs into Turso using a single batched multi-row query."""
+    if not jobs:
+        return 0
+
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        now_str = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        placeholders = []
+        args: list[Any] = []
+        for j in jobs:
+            if isinstance(j, dict):
+                title = j.get("title", "")
+                company = j.get("company", "")
+                loc = j.get("location", "Unknown")
+                plat = j.get("platform", "web")
+                url = j.get("url", "")
+                desc = j.get("description", "")
+                tier = j.get("tier", "strict")
+                cat = j.get("job_category", "General")
+                j_id = j.get("job_id") or title_company_hash(title, company)
+            else:
+                title = getattr(j, "title", "")
+                company = getattr(j, "company", "")
+                loc = getattr(j, "location", "Unknown")
+                plat = getattr(j, "platform", "web")
+                url = getattr(j, "url", "")
+                desc = getattr(j, "description", "")
+                tier = getattr(j, "tier", "strict")
+                cat = getattr(j, "job_category", "General")
+                j_id = getattr(j, "job_id", "") or title_company_hash(title, company)
+
+            d_hash = generate_desc_hash(desc)
+            placeholders.append("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            args.extend([
+                j_id,
+                title,
+                company,
+                loc or "Unknown",
+                plat,
+                url,
+                desc,
+                0,
+                "Unknown",
+                now_str,
+                0,
+                "parked",
+                tier,
+                reason,
+                cat or "General",
+                d_hash,
+            ])
+
+        sql = f"""
+        INSERT OR REPLACE INTO job_postings (
+            job_id, title, company, location, platform, url,
+            description, ai_score, visa_sponsorship, date_found,
+            alert_sent, status, tier, match_reason, job_category,
+            desc_hash
+        ) VALUES {', '.join(placeholders)}
+        """
+        await client.execute_query(sql, args)
+        log.info("Bulk parked %d job(s) in Turso with status='parked'.", len(jobs))
+        return len(jobs)
+    except Exception as exc:
+        log.error("Failed to bulk park jobs in Turso: %s", exc)
+        return 0
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
+async def bulk_park_jobs(
+    jobs: list[Any],
+    reason: str = "Ensemble circuit breaker triggered",
+    client: Optional[AsyncTursoConnection] = None,
+) -> int:
+    """Park all provided candidate jobs via a single Turso query, funneling through writer if active."""
+    writer = get_active_db_writer()
+    if client is None and writer is not None and writer._running:
+        return await writer.submit("bulk_park", {"jobs": jobs, "reason": reason})
+    return await _execute_bulk_park_jobs(jobs, reason, client)
+
+
+async def purge_stale_parked_jobs(client: Optional[AsyncTursoConnection] = None) -> int:
+    """Purge stale parked/deferred jobs to provide a clean slate for v2.1 pipeline."""
+    sql = """
+    UPDATE job_postings 
+    SET status = 'discarded', match_reason = 'Stale backlog purged (v2.1 clean slate)'
+    WHERE status IN ('parked', 'deferred', 'pending_groq_verification')
+    """
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        res = await client.execute_query(sql)
+        log.info("Purged stale parked/deferred jobs in Turso.")
+        return 1
+    except Exception as exc:
+        log.error("Failed to purge stale parked jobs: %s", exc)
+        return 0
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
+async def fix_workday_urls_in_db(client: Optional[AsyncTursoConnection] = None) -> int:
+    """Backfills and fixes existing Workday job records that have broken /en-US/External/ links."""
+    from scrapers.workday import MEDTECH_WORKDAY_TENANTS
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    fixed_count = 0
+    try:
+        for tenant in MEDTECH_WORKDAY_TENANTS:
+            site_slug = tenant["url"].rstrip("/").split("/")[-1]
+            if site_slug == "External":
+                continue
+            company_name = tenant["name"]
+            sql = """
+            UPDATE job_postings
+            SET url = replace(url, '/en-US/External/', '/en-US/' || ? || '/')
+            WHERE company = ? AND url LIKE '%/en-US/External/%'
+            """
+            await client.execute_query(sql, [site_slug, company_name])
+            fixed_count += 1
+        log.info("Workday URL backfill completed across tenants.")
+        return fixed_count
+    except Exception as exc:
+        log.error("Failed to backfill Workday URLs: %s", exc)
+        return 0
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
+async def increment_job_retry(
+    job_id: str,
+    client: Optional[AsyncTursoConnection] = None,
+) -> bool:
+    """Increment retry_count for a job and automatically mark as 'discarded' if retries >= 3."""
+    sql = """
+    UPDATE job_postings
+    SET retry_count = retry_count + 1,
+        status = CASE WHEN retry_count + 1 >= 3 THEN 'discarded' ELSE status END,
+        match_reason = CASE WHEN retry_count + 1 >= 3 THEN 'Maximum retries (3) exceeded - discarded' ELSE match_reason END
+    WHERE job_id = ?
+    """
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    try:
+        await client.execute_query(sql, [job_id])
+        return True
+    except Exception as exc:
+        log.warning("Failed to increment retry_count for job '%s': %s", job_id, exc)
+        return False
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
 async def get_deferred_jobs(
     limit: int = 50,
     client: Optional[AsyncTursoConnection] = None,
 ) -> list[dict[str, Any]]:
-    """Retrieve jobs with status 'deferred' to be re-evaluated during morning runs.
+    """Retrieve jobs with status 'deferred' or 'parked' with retry_count < 3.
 
     Args:
         limit: Maximum number of deferred jobs to retrieve (default: 50).
@@ -465,7 +772,7 @@ async def get_deferred_jobs(
     Returns:
         List of dictionaries containing deferred job records.
     """
-    sql = "SELECT * FROM job_postings WHERE status = 'deferred' ORDER BY date_found ASC LIMIT ?"
+    sql = "SELECT * FROM job_postings WHERE status IN ('deferred', 'parked') AND retry_count < 3 ORDER BY date_found ASC LIMIT ?"
     close_client = False
     if client is None:
         client = get_turso_client()
@@ -516,7 +823,7 @@ async def get_pending_groq_jobs(
             await client.session.close()
 
 
-async def update_job_status(
+async def _execute_update_job_status(
     job_id: str,
     status: str,
     ai_score: Optional[int] = None,
@@ -527,22 +834,7 @@ async def update_job_status(
     job_category: Optional[str] = None,
     client: Optional[AsyncTursoConnection] = None,
 ) -> bool:
-    """Update status, score, visa sponsorship, alert status, and category for an existing job posting.
-
-    Args:
-        job_id: Unique primary key of the job posting.
-        status: New status (e.g., 'active', 'consensus_passed', 'deferred', 'rejected').
-        ai_score: Optional integer score.
-        visa_sponsorship: Optional visa sponsorship string.
-        alert_sent: Optional flag (0 or 1).
-        tier: Optional tier string ('strict' or 'broad').
-        match_reason: Optional 1-sentence match explanation.
-        job_category: Optional category string ('Biomedical_RD', 'ECE_Hardware', 'Software_Web', 'General').
-        client: Optional shared AsyncTursoConnection instance.
-
-    Returns:
-        True if updated successfully, False otherwise.
-    """
+    """Internal query execution to update status, score, and category in Turso."""
     updates = ["status = ?"]
     args: list[Any] = [status]
 
@@ -584,16 +876,44 @@ async def update_job_status(
             await client.session.close()
 
 
-async def mark_alert_sent(
+async def update_job_status(
+    job_id: str,
+    status: str,
+    ai_score: Optional[int] = None,
+    visa_sponsorship: Optional[str] = None,
+    alert_sent: Optional[int] = None,
+    tier: Optional[str] = None,
+    match_reason: Optional[str] = None,
+    job_category: Optional[str] = None,
+    client: Optional[AsyncTursoConnection] = None,
+) -> bool:
+    """Update status, score, visa sponsorship, alert status, and category for an existing job posting.
+    
+    Funnels through AsyncDatabaseWriter queue when active.
+    """
+    writer = get_active_db_writer()
+    if client is None and writer is not None and writer._running:
+        payload = {
+            "job_id": job_id,
+            "status": status,
+            "ai_score": ai_score,
+            "visa_sponsorship": visa_sponsorship,
+            "alert_sent": alert_sent,
+            "tier": tier,
+            "match_reason": match_reason,
+            "job_category": job_category,
+        }
+        return await writer.submit("update_status", payload)
+    return await _execute_update_job_status(
+        job_id, status, ai_score, visa_sponsorship, alert_sent, tier, match_reason, job_category, client
+    )
+
+
+async def _execute_mark_alert_sent(
     job_id: str,
     client: Optional[AsyncTursoConnection] = None,
 ) -> None:
-    """Mark a job record as alerted after Discord notification succeeds.
-
-    Args:
-        job_id: The unique primary key of the job posting.
-        client: Optional shared AsyncTursoConnection instance.
-    """
+    """Internal query execution to mark a job record as alerted."""
     close_client = False
     if client is None:
         client = get_turso_client()
@@ -609,6 +929,18 @@ async def mark_alert_sent(
     finally:
         if close_client and client.session:
             await client.session.close()
+
+
+async def mark_alert_sent(
+    job_id: str,
+    client: Optional[AsyncTursoConnection] = None,
+) -> None:
+    """Mark a job record as alerted after Discord notification succeeds."""
+    writer = get_active_db_writer()
+    if client is None and writer is not None and writer._running:
+        await writer.submit("mark_alert_sent", job_id)
+        return
+    await _execute_mark_alert_sent(job_id, client)
 
 
 async def get_job(

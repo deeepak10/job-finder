@@ -224,6 +224,10 @@ EXPECTED_TARGET_QUERIES = [
     "Python Healthtech",
     "Signal Processing Engineer",
     "R&D Engineer Medical",
+    "Schiller ECG firmware",
+    "Schiller Healthcare R&D",
+    "BPL Medical R&D",
+    "BPL Medical firmware",
 ]
 
 
@@ -705,7 +709,7 @@ def test_workday_scraper_success(monkeypatch):
     assert len(jobs) == len(workday.MEDTECH_WORKDAY_TENANTS)
     assert jobs[0]["title"] == "Principal Firmware Engineer"
     assert jobs[0]["company"] == "Medtronic"
-    assert "medtronic.wd1.myworkdayjobs.com/en-US/External/job/" in jobs[0]["url"]
+    assert "medtronic.wd1.myworkdayjobs.com/en-US/MedtronicCareers/job/" in jobs[0]["url"]
     assert jobs[0]["location"] == "Minneapolis, MN, United States"
     assert jobs[0]["description"] == "<p>Design firmware for implantable medical devices.</p>"
     assert jobs[0]["source"] == "Workday ATS"
@@ -1036,6 +1040,201 @@ def test_run_scrapers_concurrently_forced_during_offpeak(monkeypatch):
     assert "google_jobs" in called
     assert "linkedin" in called
     assert "wellfound" in called
+
+
+def test_build_workday_candidate_url():
+    from scrapers.workday import build_workday_candidate_url, MEDTECH_WORKDAY_TENANTS
+
+    # Test Medtronic tenant URL construction
+    medtronic_tenant = next(t for t in MEDTECH_WORKDAY_TENANTS if t["name"] == "Medtronic")
+    url = build_workday_candidate_url(
+        medtronic_tenant["url"],
+        "/job/Minneapolis-MN/Senior-Firmware-Engineer_R55",
+    )
+    assert url == "https://medtronic.wd1.myworkdayjobs.com/en-US/MedtronicCareers/job/Minneapolis-MN/Senior-Firmware-Engineer_R55"
+
+    # Test Stryker tenant URL construction
+    stryker_tenant = next(t for t in MEDTECH_WORKDAY_TENANTS if t["name"] == "Stryker")
+    url_stryker = build_workday_candidate_url(
+        stryker_tenant["url"],
+        "/job/Kalamazoo-MI/Biomedical-Engineer_R10",
+    )
+    assert url_stryker == "https://stryker.wd1.myworkdayjobs.com/en-US/StrykerCareers/job/Kalamazoo-MI/Biomedical-Engineer_R10"
+
+    # Test Getinge tenant URL construction
+    getinge_tenant = next(t for t in MEDTECH_WORKDAY_TENANTS if "Getinge" in t["name"])
+    url_getinge = build_workday_candidate_url(
+        getinge_tenant["url"],
+        "/job/Gothenburg/Senior-Embedded-Engineer_JR100",
+    )
+    assert url_getinge == "https://getinge.wd3.myworkdayjobs.com/en-US/Getinge_Careers/job/Gothenburg/Senior-Embedded-Engineer_JR100"
+
+    # Test GE HealthCare tenant URL construction
+    ge_tenant = next(t for t in MEDTECH_WORKDAY_TENANTS if t["name"] == "GE HealthCare")
+    url_ge = build_workday_candidate_url(
+        ge_tenant["url"],
+        "/job/Bengaluru-India/Lead-Firmware-Engineer_R20",
+    )
+    assert url_ge == "https://gehc.wd5.myworkdayjobs.com/en-US/GEHC_ExternalSite/job/Bengaluru-India/Lead-Firmware-Engineer_R20"
+
+
+def test_expanded_medtech_tenants_and_naukri_queries():
+    """Verify GE HealthCare, Stryker, and Getinge slugs, and Schiller/BPL queries in config."""
+    import config
+    from scrapers.workday import MEDTECH_WORKDAY_TENANTS
+
+    # Workday tenant checks
+    tenants_by_slug = {t.get("slug"): t for t in MEDTECH_WORKDAY_TENANTS if "slug" in t}
+    assert "gehealthcare" in tenants_by_slug
+    assert "stryker" in tenants_by_slug
+    assert "getinge" in tenants_by_slug
+    assert tenants_by_slug["gehealthcare"]["name"] == "GE HealthCare"
+    assert tenants_by_slug["stryker"]["name"] == "Stryker"
+    assert "Getinge" in tenants_by_slug["getinge"]["name"]
+
+    # Naukri query checks
+    query_texts = [q[1] for q in config.NAUKRI_STRICT_SEARCHES]
+    assert "Schiller ECG firmware" in query_texts
+    assert "Schiller Healthcare R&D" in query_texts
+    assert "BPL Medical R&D" in query_texts
+    assert "BPL Medical firmware" in query_texts
+
+    # Target healthcare company VIP list checks
+    vip_companies = [c.lower() for c in config.TARGET_HEALTHCARE_COMPANIES]
+    assert any("schiller" in c for c in vip_companies)
+    assert any("bpl" in c for c in vip_companies)
+    assert any("getinge" in c for c in vip_companies)
+
+
+def test_new_targets_schema_and_pipeline_integration(monkeypatch):
+    """Verify scraped items conform to JobResult, Layer 0 desc_hash, and coarse filter schema."""
+    import asyncio
+    import config
+    from scrapers.base import JobResult
+    from deduplication import generate_desc_hash
+    from evaluator import batch_coarse_filter_groq
+
+    monkeypatch.setattr(config, "GROQ_API_KEY", "")
+
+    mock_scraped = [
+        {
+            "title": "Senior Firmware Engineer",
+            "company": "GE HealthCare",
+            "location": "Bengaluru, India",
+            "url": "https://gehc.wd5.myworkdayjobs.com/en-US/GEHC_ExternalSite/job/Bengaluru/R1",
+            "description": "Design safety-critical firmware for medical imaging devices in C/C++.",
+            "source": "Workday ATS",
+            "tier": "strict",
+        },
+        {
+            "title": "Embedded Systems Lead",
+            "company": "Getinge (Maquet)",
+            "location": "Bengaluru, India",
+            "url": "https://getinge.wd3.myworkdayjobs.com/en-US/Getinge_Careers/job/Bengaluru/R2",
+            "description": "Lead firmware development for ventilators and cardiopulmonary perfusion equipment.",
+            "source": "Workday ATS",
+            "tier": "strict",
+        },
+        {
+            "title": "R&D Firmware Engineer - ECG Systems",
+            "company": "Schiller Healthcare",
+            "location": "Puducherry, India",
+            "url": "https://www.naukri.com/job/schiller-ecg-123",
+            "description": "Develop low-power microcontroller firmware for 12-lead ECG machines and telemetry.",
+            "source": "naukri",
+            "tier": "strict",
+        },
+        {
+            "title": "Senior Hardware R&D Engineer",
+            "company": "BPL Medical Technologies",
+            "location": "Palakkad, Kerala, India",
+            "url": "https://www.naukri.com/job/bpl-medical-456",
+            "description": "Circuit board design, PCB layout, and embedded firmware for patient monitoring systems.",
+            "source": "naukri",
+            "tier": "strict",
+        },
+    ]
+
+    job_results = []
+    for item in mock_scraped:
+        jr = JobResult(
+            title=item["title"],
+            company=item["company"],
+            url=item["url"],
+            platform=item["source"],
+            location=item["location"],
+            description=item["description"],
+            tier=item["tier"],
+        )
+        assert jr.is_valid()
+        assert jr.tier == "strict"
+        assert not jr.is_international  # All India locations
+        job_results.append(jr)
+
+        # Layer 0 Fuzzy Description Hash verification
+        desc_hash = generate_desc_hash(jr.description)
+        assert len(desc_hash) == 16
+        assert isinstance(desc_hash, str)
+
+    # Verify input compatibility with batch_coarse_filter_groq (without API key returns fallback)
+    kept, discarded = asyncio.run(batch_coarse_filter_groq(job_results))
+    # When no API key is provided, coarse filter safely keeps all candidates
+    assert len(kept) == 4
+    assert len(discarded) == 0
+
+
+
+def test_naukri_apify_proxy_configuration(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from scrapers import naukri
+
+    monkeypatch.setattr(naukri.config, "NAUKRI_ACTOR_ID", "test-actor-id")
+    monkeypatch.setattr(naukri.config, "APIFY_TOKEN", "test-apify-token")
+
+    called_actor = None
+    called_token = None
+
+    class MockDataset:
+        async def iterate_items(self):
+            items = [
+                {
+                    "title": "Bio Engineer",
+                    "companyName": "Siemens Healthineers",
+                    "url": "https://www.naukri.com/job/1",
+                    "location": "Bengaluru",
+                    "jobDescription": "Biomedical software development",
+                }
+            ]
+            for item in items:
+                yield item
+
+    class MockActor:
+        async def call(self, *args, **kwargs):
+            return {"defaultDatasetId": "test-dataset-id"}
+
+    class MockApifyClientAsync:
+        def __init__(self, token=None):
+            nonlocal called_token
+            called_token = token
+
+        def actor(self, actor_id):
+            nonlocal called_actor
+            called_actor = actor_id
+            return MockActor()
+
+        def dataset(self, dataset_id):
+            return MockDataset()
+
+    import apify_client
+    monkeypatch.setattr(apify_client, "ApifyClientAsync", MockApifyClientAsync)
+
+    jobs = asyncio.run(naukri.scrape_async())
+    assert called_actor == "test-actor-id"
+    assert called_token == "test-apify-token"
+    assert len(jobs) > 0
+    assert jobs[0].title == "Bio Engineer"
+
 
 
 

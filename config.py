@@ -24,6 +24,7 @@ APIFY_TOKEN: str = os.getenv("APIFY_TOKEN", "").strip()
 RAPIDAPI_KEY: str = os.getenv("RAPIDAPI_KEY", "").strip()
 WELLFOUND_ACTOR_ID: str = os.getenv("WELLFOUND_ACTOR_ID", "").strip()
 LINKEDIN_ACTOR_ID: str = os.getenv("LINKEDIN_ACTOR_ID", "").strip()
+NAUKRI_ACTOR_ID: str = os.getenv("NAUKRI_ACTOR_ID", "").strip()
 ADZUNA_APP_ID: str = os.getenv("ADZUNA_APP_ID", "").strip()
 ADZUNA_APP_KEY: str = os.getenv("ADZUNA_APP_KEY", "").strip()
 DISCORD_WEBHOOK_URL: str = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
@@ -39,9 +40,9 @@ DISCORD_WEBHOOK_SOFTWARE: str = os.getenv("DISCORD_WEBHOOK_SOFTWARE", "").strip(
 TURSO_DATABASE_URL: str = os.getenv("TURSO_DATABASE_URL", "").strip()
 TURSO_AUTH_TOKEN: str = os.getenv("TURSO_AUTH_TOKEN", "").strip()
 
-# Gemini LLM Evaluation — Strictly targets gemini-3.6-flash to prevent 404/503 errors
+# Gemini LLM Evaluation — Production gemini-1.5-flash endpoint (1,500 RPD / 15 RPM)
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL: str = "gemini-3.6-flash"
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
 GEMINI_TIMEOUT_SECONDS: float = 45.0
 
 # Groq Fallback LLM Evaluation (Multi-Model Rotation: Llama-3.3-70B -> Llama-3.1-8B)
@@ -62,6 +63,11 @@ TARGET_HEALTHCARE_COMPANIES: list[str] = [
     "Philips",
     "Qure.ai",
     "Agappe Diagnostics",
+    "Schiller Healthcare",
+    "Schiller",
+    "BPL Medical Technologies",
+    "BPL Medical",
+    "Getinge",
 ]
 
 
@@ -127,6 +133,10 @@ TARGET_QUERIES = [
     "Python Healthtech",
     "Signal Processing Engineer",
     "R&D Engineer Medical",
+    "Schiller ECG firmware",
+    "Schiller Healthcare R&D",
+    "BPL Medical R&D",
+    "BPL Medical firmware",
 ]
 
 STRICT_QUERIES = [
@@ -136,6 +146,10 @@ STRICT_QUERIES = [
     "IoT Medical Devices",
     "Signal Processing Engineer",
     "R&D Engineer Medical",
+    "Schiller ECG firmware",
+    "Schiller Healthcare R&D",
+    "BPL Medical R&D",
+    "BPL Medical firmware",
 ]
 
 BROAD_QUERIES = [
@@ -154,6 +168,10 @@ TARGET_URLS = [
     "https://www.naukri.com/biomedical-firmware-jobs",
     "https://www.naukri.com/medical-iot-jobs",
     "https://www.naukri.com/signal-processing-engineer-jobs",
+    "https://www.naukri.com/schiller-ecg-firmware-jobs",
+    "https://www.naukri.com/schiller-healthcare-rnd-jobs",
+    "https://www.naukri.com/bpl-medical-rnd-jobs",
+    "https://www.naukri.com/bpl-medical-firmware-jobs",
 
     # Tier 2: The Constrained Net (Generic Title + Domain Modifier)
     "https://www.naukri.com/embedded-software-engineer-healthcare-jobs",
@@ -169,6 +187,10 @@ NAUKRI_STRICT_SEARCHES = [
     ("iot-medical-devices-jobs", "IoT Medical Devices"),
     ("signal-processing-engineer-jobs", "Signal Processing Engineer"),
     ("rnd-engineer-medical-jobs", "R&D Engineer Medical"),
+    ("schiller-ecg-firmware-jobs", "Schiller ECG firmware"),
+    ("schiller-healthcare-rnd-jobs", "Schiller Healthcare R&D"),
+    ("bpl-medical-rnd-jobs", "BPL Medical R&D"),
+    ("bpl-medical-firmware-jobs", "BPL Medical firmware"),
 ]
 
 NAUKRI_BROAD_SEARCHES = [

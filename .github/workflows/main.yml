@@ -56,7 +56,7 @@ jobs:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: "gemini-3.6-flash"
+          GEMINI_MODEL: "gemini-1.5-flash"
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -65,6 +65,7 @@ jobs:
           DISCORD_WEBHOOK_SOFTWARE: ${{ secrets.DISCORD_WEBHOOK_SOFTWARE }}
           SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          NAUKRI_ACTOR_ID: ${{ secrets.NAUKRI_ACTOR_ID }}
           RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
           WELLFOUND_ACTOR_ID: ${{ secrets.WELLFOUND_ACTOR_ID }}
           LINKEDIN_ACTOR_ID: ${{ secrets.LINKEDIN_ACTOR_ID }}

@@ -129,3 +129,74 @@ def clean_and_truncate_text(raw_html_or_text: Optional[str], max_chars: int = 35
 clean_html_text = clean_and_truncate_text
 
 
+# --------------------------------------------------------------------------
+# Layer 2B: Semantic Anchoring & Description Hashing
+# --------------------------------------------------------------------------
+
+import hashlib
+
+DESC_ANCHORS: list[str] = [
+    "qualifications",
+    "requirements",
+    "what you'll do",
+    "what you will do",
+    "responsibilities",
+    "key responsibilities",
+    "role overview",
+    "about the role",
+    "job description",
+    "job summary",
+    "basic qualifications",
+    "minimum qualifications",
+    "preferred qualifications",
+    "skills required",
+    "what we are looking for",
+    "what you bring",
+    "position overview",
+    "essential duties",
+]
+
+
+def extract_anchored_description(description: str) -> str:
+    """Extract description starting from the first semantic anchor to skip boilerplate company intros."""
+    if not description or description == "Description not available.":
+        return ""
+
+    desc_lower = description.lower()
+    best_index = -1
+
+    for anchor in DESC_ANCHORS:
+        idx = desc_lower.find(anchor)
+        if idx != -1:
+            if best_index == -1 or idx < best_index:
+                best_index = idx
+
+    if best_index != -1:
+        return description[best_index:]
+    return description
+
+
+def generate_desc_hash(description: str) -> str:
+    """Creates a deterministic hash of the core job description using semantic anchoring.
+    
+    Anchors at sections like 'Qualifications', 'Requirements', or 'What you'll do'
+    to prevent enterprise company mission boilerplate (e.g. Medtronic/Philips intros)
+    from causing false-positive deduplication collisions across different job postings.
+    """
+    if not description or description == "Description not available.":
+        return ""
+
+    anchored = extract_anchored_description(description)
+    normalized = re.sub(r"[^a-z0-9]", "", anchored.lower())
+
+    if not normalized:
+        normalized = re.sub(r"[^a-z0-9]", "", description.lower())
+
+    if not normalized:
+        return ""
+
+    # Hash only the first 500 characters of the anchored content
+    return hashlib.sha256(normalized[:500].encode("utf-8")).hexdigest()[:16]
+
+
+

@@ -108,13 +108,111 @@ async def _scrape_page(page, url: str, tier: str = "strict") -> list[JobResult]:
     return jobs
 
 
+async def _scrape_via_apify(actor_id: str, apify_token: str) -> list[JobResult]:
+    """Scrapes Naukri using an Apify Actor with rotating residential proxies."""
+    from datetime import timedelta
+    from apify_client import ApifyClientAsync
+
+    client = ApifyClientAsync(token=apify_token)
+    run_input = {
+        "queries": [
+            "medical device",
+            "biomedical",
+            "firmware",
+            "Schiller ECG firmware",
+            "Schiller Healthcare R&D",
+            "BPL Medical R&D",
+            "BPL Medical firmware",
+        ],
+        "keywords": [
+            "medical device",
+            "biomedical",
+            "firmware",
+            "Schiller ECG firmware",
+            "Schiller Healthcare R&D",
+            "BPL Medical R&D",
+            "BPL Medical firmware",
+        ],
+        "location": "India",
+        "maxItems": 25,
+    }
+
+    try:
+        try:
+            run = await client.actor(actor_id).call(
+                run_input=run_input,
+                timeout=timedelta(seconds=60),
+                wait_secs=60,
+            )
+        except TypeError:
+            run = await client.actor(actor_id).call(run_input=run_input)
+    except Exception as e:
+        log.warning("Naukri Apify actor run failed: %s", e)
+        return []
+
+    dataset_id = (
+        getattr(run, "default_dataset_id", None)
+        or getattr(run, "defaultDatasetId", None)
+        or (run.get("defaultDatasetId") if isinstance(run, dict) else None)
+    )
+    if not dataset_id:
+        log.warning("Naukri Apify run returned no dataset ID — skipping.")
+        return []
+
+    dataset_items = []
+    async for item in client.dataset(dataset_id).iterate_items():
+        dataset_items.append(item)
+
+    jobs: list[JobResult] = []
+    for item in dataset_items:
+        title = item.get("title") or item.get("job_title") or item.get("position")
+        company = item.get("company") or item.get("companyName") or item.get("company_name")
+        url = item.get("url") or item.get("jobUrl") or item.get("job_url")
+        location = item.get("location") or "India"
+        description = item.get("description") or item.get("job_description") or ""
+
+        if title and url:
+            jobs.append(
+                JobResult(
+                    title=str(title).strip(),
+                    company=str(company or "Unknown").strip(),
+                    location=str(location).strip(),
+                    url=str(url).strip(),
+                    platform=PLATFORM,
+                    description=str(description).strip(),
+                    tier="strict",
+                )
+            )
+    return jobs
+
+
 async def scrape(headless: bool = True) -> list[JobResult]:
-    """Run every configured Naukri search. Returns raw (not yet deduped) results."""
-    from playwright.async_api import async_playwright
+    """Run every configured Naukri search.
+    
+    Prefers Apify Actor with residential proxy rotation to bypass Akamai/Cloudflare WAFs in CI.
+    Falls back gracefully to local headless Playwright when Apify is not configured.
+    """
+    import os
+
+    actor_id = getattr(config, "NAUKRI_ACTOR_ID", "") or os.getenv("NAUKRI_ACTOR_ID", "")
+    apify_token = getattr(config, "APIFY_TOKEN", "") or os.getenv("APIFY_TOKEN", "")
+
+    if actor_id and apify_token:
+        log.info("Scraping Naukri via Apify Actor (%s) with residential proxy rotation...", actor_id)
+        try:
+            return await _scrape_via_apify(actor_id, apify_token)
+        except Exception as exc:
+            log.warning("Naukri Apify scraper failed safely: %s", exc)
+            return []
+
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        log.warning("Playwright is not installed. Skipping direct Naukri scraping.")
+        return []
 
     results: list[JobResult] = []
     async with async_playwright() as pw:
-        import os
         proxy_server = os.getenv("NAUKRI_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY")
         proxy_config = {"server": proxy_server} if proxy_server else None
         browser = await pw.chromium.launch(

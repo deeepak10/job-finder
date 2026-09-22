@@ -83,3 +83,29 @@ def test_clean_html_text_alias():
     html = "<div><p>Embedded C++ Engineer</p></div>"
     assert clean_html_text(html) == "Embedded C++ Engineer"
 
+
+def test_semantic_anchoring_differentiates_identical_boilerplate():
+    from filters import extract_anchored_description, generate_desc_hash
+
+    # Two jobs sharing the same 600 characters of company boilerplate
+    boilerplate = (
+        "Welcome to MedTech Enterprise Corp! We are a leading global healthcare technology company "
+        "dedicated to improving the lives of millions. We offer comprehensive medical, dental, and vision "
+        "benefits, 401(k) matching, paid time off, and continuous learning opportunities. "
+        "We are an equal opportunity employer and value diversity across all teams. "
+    )
+    job1_text = boilerplate + "Key Responsibilities: Design implantable pacemaker firmware using C++."
+    job2_text = boilerplate + "Key Responsibilities: Develop Python cloud analytics for hospital telemetry."
+
+    # Anchored extraction should pick up from 'Key Responsibilities:'
+    anchored1 = extract_anchored_description(job1_text)
+    anchored2 = extract_anchored_description(job2_text)
+    assert "implantable pacemaker" in anchored1
+    assert "cloud analytics" in anchored2
+
+    # Hashes must differ even though the first 500 characters of the raw text are 100% identical!
+    h1 = generate_desc_hash(job1_text)
+    h2 = generate_desc_hash(job2_text)
+    assert h1 != h2
+
+

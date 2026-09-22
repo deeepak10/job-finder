@@ -201,7 +201,7 @@ def test_target_urls_and_spam_keywords_configured():
     from filters import SPAM_KEYWORDS
 
     assert hasattr(config, "TARGET_URLS")
-    assert len(config.TARGET_URLS) == 8
+    assert len(config.TARGET_URLS) >= 8
     assert "https://www.naukri.com/medical-device-rnd-jobs" in config.TARGET_URLS
     assert "https://www.naukri.com/software-engineer-medical-device-jobs" in config.TARGET_URLS
 

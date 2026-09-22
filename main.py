@@ -39,13 +39,20 @@ import aiohttp
 import config
 from database import (
     add_job,
+    bulk_park_jobs,
+    fix_workday_urls_in_db,
     get_deferred_jobs,
     get_pending_groq_jobs,
     get_stats,
+    increment_job_retry,
     init_db,
     is_job_duplicate,
     is_job_seen,
     mark_alert_sent,
+    purge_stale_parked_jobs,
+    run_schema_migrations,
+    start_db_writer,
+    stop_db_writer,
     title_company_hash,
     update_job_status,
 )
@@ -54,6 +61,7 @@ from evaluator import (
     GEMINI_QUOTA_EXHAUSTED,
     GeminiQuotaExceededError,
     JobEvaluation,
+    batch_coarse_filter_groq,
     build_job_prompt,
     evaluate_job,
     evaluate_job_consensus,
@@ -124,6 +132,21 @@ def parse_args() -> argparse.Namespace:
         "--stats",
         action="store_true",
         help="Query Turso Cloud Database metrics and exit.",
+    )
+    parser.add_argument(
+        "--migrate",
+        action="store_true",
+        help="Run schema column migrations (ALTER TABLE / DROP COLUMN) on Turso.",
+    )
+    parser.add_argument(
+        "--purge-parked",
+        action="store_true",
+        help="Purge stale parked/deferred jobs to reset the queue for a clean slate.",
+    )
+    parser.add_argument(
+        "--fix-workday-urls",
+        action="store_true",
+        help="Backfill and fix legacy broken Workday alert links in Turso.",
     )
     parser.add_argument(
         "--check-config",
@@ -206,6 +229,7 @@ class PipelineMetrics:
         self.scraped: int = 0
         self.seen_skipped: int = 0
         self.spam_discarded: int = 0
+        self.coarse_discarded: int = 0
         self.deferred_swept: int = 0
         self.evaluated: int = 0
         self.high_matches: int = 0
@@ -227,6 +251,11 @@ class PipelineMetrics:
     async def inc_spam(self) -> None:
         async with self.lock:
             self.spam_discarded += 1
+
+    async def inc_coarse_discarded(self, count: int = 1) -> None:
+        async with self.lock:
+            self.coarse_discarded += count
+            self.rejected += count
 
     async def inc_evaluated(
         self,
@@ -354,9 +383,31 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     log.info("Starting Unified Autonomous AI Job Pipeline (v2)%s at %s...",
              " [DRY RUN]" if args.dry_run else "", _ts())
 
-    # Ensure Turso schema is ready
-    if not args.dry_run:
-        await init_db()
+    # Ensure Turso schema is ready and start dedicated AsyncDatabaseWriter
+    turso_client = None
+    if not args.dry_run and config.TURSO_DATABASE_URL and config.TURSO_AUTH_TOKEN:
+        try:
+            from database import get_turso_client
+            turso_client = get_turso_client()
+            start_db_writer(turso_client)
+            await init_db(client=turso_client)
+            if getattr(args, "migrate", False):
+                await run_schema_migrations(client=turso_client)
+            if getattr(args, "purge_parked", False):
+                await purge_stale_parked_jobs(client=turso_client)
+            if getattr(args, "fix_workday_urls", False):
+                await fix_workday_urls_in_db(client=turso_client)
+        except Exception as exc:
+            log.warning("Could not initialize pooled Turso client or DB writer: %s", exc)
+
+    async def _cleanup() -> None:
+        """Safely drain DB writer queue and close Turso client session."""
+        await stop_db_writer()
+        if turso_client and turso_client.session:
+            try:
+                await turso_client.session.close()
+            except Exception:
+                pass
 
     # =========================================================================
     # Phase 1: [Scraping Phase]
@@ -381,6 +432,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
             "CRITICAL: Scraping phase yielded 0 total jobs. Possible IP ban, CAPTCHA wall, or UI change on target job boards. Check Playwright logs."
         )
         log.info("No scraped jobs to process. Exiting pipeline.")
+        await _cleanup()
         return
 
     # =========================================================================
@@ -402,43 +454,79 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
 
     # Step B: Layer 0 O(1) Turso Database Deduplication with connection reuse
     candidate_jobs: list[JobResult] = []
-    turso_client = None
-    if not args.dry_run and config.TURSO_DATABASE_URL and config.TURSO_AUTH_TOKEN:
-        try:
-            from database import get_turso_client
-            turso_client = get_turso_client()
-        except Exception as exc:
-            log.warning("Could not initialize pooled Turso client: %s", exc)
+    async def check_seen(job: JobResult) -> Optional[JobResult]:
+        seen = await is_job_seen(
+            url_or_id=job.url,
+            title=job.title,
+            company=job.company,
+            description=job.description,
+            client=turso_client,
+        )
+        if seen:
+            log.info("Layer 0: Skipped already-seen job '%s' @ %s", job.title, job.company)
+            await metrics.inc_seen()
+            return None
+        return job
 
-    try:
-        async def check_seen(job: JobResult) -> Optional[JobResult]:
-            seen = await is_job_seen(
-                url_or_id=job.url,
-                title=job.title,
-                company=job.company,
-                description=job.description,
-                client=turso_client,
-            )
-            if seen:
-                log.info("Layer 0: Skipped already-seen job '%s' @ %s", job.title, job.company)
-                await metrics.inc_seen()
-                return None
-            return job
-
-        # Check all non-spam candidates concurrently
-        results = await asyncio.gather(*(check_seen(j) for j in non_spam_jobs))
-        candidate_jobs = [j for j in results if j is not None]
-    finally:
-        if turso_client and turso_client.session:
-            await turso_client.session.close()
+    # Check all non-spam candidates concurrently
+    results = await asyncio.gather(*(check_seen(j) for j in non_spam_jobs))
+    candidate_jobs = [j for j in results if j is not None]
 
     t_dedup_elapsed = time.perf_counter() - t_dedup_start
     log.info("========== [Database Deduplication Phase] END (%s) | Duration: %.2fs | Filtered: %d -> %d fresh jobs ==========",
              _ts(), t_dedup_elapsed, len(scraped_jobs), len(candidate_jobs))
     print(f"[{_ts()}] >>> [Database Deduplication Phase] END | Duration: {t_dedup_elapsed:.2f}s | Fresh: {len(candidate_jobs)} jobs")
 
+    # Step C: Layer 1 Coarse Batch Pre-Filtering (Groq 1-Call High-Recall Pruning)
+    if candidate_jobs and getattr(config, "GROQ_API_KEY", None):
+        t_coarse_start = time.perf_counter()
+        log.info("Executing Layer 1 Coarse Batch Pre-Filter via Groq on %d candidate jobs...", len(candidate_jobs))
+        print(f"[{_ts()}] >>> [Layer 1 Groq Coarse Filter] Pre-filtering {len(candidate_jobs)} candidates with 1 Groq API call...")
+        relevant_candidates, discarded_candidates = await batch_coarse_filter_groq(candidate_jobs)
+
+        if discarded_candidates:
+            coarse_discarded_count = len(discarded_candidates)
+            await metrics.inc_coarse_discarded(coarse_discarded_count)
+            log.info("Layer 1 Coarse Filter: Dropped %d non-technical roles before deep evaluation.", coarse_discarded_count)
+            print(f"[{_ts()}] [Layer 1 Groq Coarse Filter] Pruned {coarse_discarded_count} non-technical roles. {len(relevant_candidates)} relevant candidates remaining.")
+
+            # Persist discarded candidates to Turso as rejected so they are never re-scraped or re-evaluated
+            if not args.dry_run:
+                now_str = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                for d_job in discarded_candidates:
+                    d_title = getattr(d_job, "title", "") if not isinstance(d_job, dict) else d_job.get("title", "")
+                    d_company = getattr(d_job, "company", "") if not isinstance(d_job, dict) else d_job.get("company", "")
+                    d_loc = getattr(d_job, "location", "") if not isinstance(d_job, dict) else d_job.get("location", "")
+                    d_plat = getattr(d_job, "platform", "web") if not isinstance(d_job, dict) else d_job.get("platform", "web")
+                    d_url = getattr(d_job, "url", "") if not isinstance(d_job, dict) else d_job.get("url", "")
+                    d_desc = getattr(d_job, "description", "") if not isinstance(d_job, dict) else d_job.get("description", "")
+                    d_tier = getattr(d_job, "tier", "broad") if not isinstance(d_job, dict) else d_job.get("tier", "broad")
+                    d_id = title_company_hash(d_title, d_company)
+                    rec = {
+                        "job_id": d_id,
+                        "title": d_title,
+                        "company": d_company,
+                        "location": d_loc,
+                        "platform": d_plat,
+                        "url": d_url,
+                        "description": d_desc,
+                        "ai_score": 0,
+                        "visa_sponsorship": "Non-Technical",
+                        "date_found": now_str,
+                        "alert_sent": 0,
+                        "status": "rejected",
+                        "tier": d_tier,
+                        "match_reason": "Coarse Groq pre-filter: non-technical role",
+                        "job_category": "General",
+                    }
+                    await add_job(rec)
+
+        candidate_jobs = relevant_candidates
+        t_coarse_elapsed = time.perf_counter() - t_coarse_start
+        log.info("Layer 1 Coarse Batch Pre-Filter completed in %.2fs. Remaining fresh candidates: %d", t_coarse_elapsed, len(candidate_jobs))
+
     if not candidate_jobs:
-        log.info("No fresh candidate jobs to evaluate after deduplication.")
+        log.info("No fresh candidate jobs to evaluate after deduplication and coarse filtering.")
 
     # Check for broad jobs pending Groq confirmation (Fallback Ambiguity Rule)
     pending_groq_to_sweep: list[dict[str, Any]] = []
@@ -455,6 +543,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
 
     if not candidate_jobs and not pending_groq_to_sweep and not getattr(args, "re_eval_deferred", False):
         log.info("No fresh candidate, pending verification, or explicit sweep jobs to evaluate. Exiting pipeline.")
+        await _cleanup()
         return
 
     # =========================================================================
@@ -471,6 +560,8 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     gemini_quota_exhausted = False
     global current_gemini_calls
     current_gemini_calls = 0
+    consecutive_fallback_errors = 0
+    MAX_CONSECUTIVE_FALLBACK_ERRORS = 3
 
     async with aiohttp.ClientSession() as session:
         # ---------------------------------------------------------------------
@@ -558,6 +649,17 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
         # ---------------------------------------------------------------------
         total_candidates = len(candidate_jobs)
         for eval_index, job in enumerate(candidate_jobs, 1):
+            if consecutive_fallback_errors >= MAX_CONSECUTIVE_FALLBACK_ERRORS:
+                log.error(
+                    "Circuit breaker tripped: %d consecutive fallback errors. AI providers exhausted (Groq TPD / OpenRouter). Aborting evaluation phase.",
+                    consecutive_fallback_errors,
+                )
+                print(f"[{_ts()}] [CIRCUIT BREAKER TRIPPED] {consecutive_fallback_errors} consecutive fallback errors. Bulk parking {total_candidates - eval_index + 1} remaining jobs.")
+                if not args.dry_run:
+                    remaining_to_park = candidate_jobs[eval_index - 1:]
+                    await bulk_park_jobs(remaining_to_park, reason="Consecutive fallback quota exhaustion", client=turso_client)
+                break
+
             # Client-Side Pacing (Anti-Burst)
             # 2.0 seconds guarantees we never exceed 30 Requests Per Minute on Groq/OpenRouter
             await asyncio.sleep(2.0)
@@ -608,6 +710,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                     log.warning("Gemini run call limit (%d) reached. Triggering Unanimous Junior Consensus...", MAX_GEMINI_CALLS_PER_RUN)
 
                 if evaluation:
+                    consecutive_fallback_errors = 0
                     status_val = "active" if evaluation.is_match else "rejected"
                     is_high_match = bool(evaluation.is_match and (evaluation.match_score or 0) >= 70)
                     rec = {
@@ -643,8 +746,19 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                 else:
                     # Unanimous Junior Consensus for VIP Jobs
                     log.info("Triggering Unanimous Junior Consensus for '%s' @ %s", job.title, job.company)
-                    consensus_eval = await evaluate_job_consensus(job_payload)
-                    c_status = consensus_eval.status
+                    consensus_eval = None
+                    try:
+                        consensus_eval = await evaluate_job_consensus(job_payload)
+                        if consensus_eval and getattr(consensus_eval, "status", None) != "error":
+                            consecutive_fallback_errors = 0
+                        else:
+                            consecutive_fallback_errors += 1
+                    except Exception as cons_exc:
+                        log.warning("Junior consensus exception for '%s': %s", job.title, cons_exc)
+                        consensus_eval = JobEvaluation(is_match=False, status="error", match_reason=str(cons_exc))
+                        consecutive_fallback_errors += 1
+
+                    c_status = getattr(consensus_eval, "status", "error")
 
                     if c_status == "consensus_passed":
                         # MUST be unanimous to pass the Strict tier gate
@@ -698,6 +812,17 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             await add_job(rec)
                         await metrics.inc_evaluated(is_high_match=False, alerted=False, is_deferred=True, is_strict=True)
 
+                        if consecutive_fallback_errors >= MAX_CONSECUTIVE_FALLBACK_ERRORS:
+                            log.error(
+                                "Circuit breaker tripped: %d consecutive fallback errors in Junior Consensus. Aborting evaluation phase.",
+                                consecutive_fallback_errors,
+                            )
+                            print(f"[{_ts()}] [CIRCUIT BREAKER TRIPPED] {consecutive_fallback_errors} consecutive fallback errors. Bulk parking remaining jobs.")
+                            if not args.dry_run and eval_index < total_candidates:
+                                remaining_to_park = candidate_jobs[eval_index:]
+                                await bulk_park_jobs(remaining_to_park, reason="Consecutive fallback quota exhaustion", client=turso_client)
+                            break
+
             else:
                 # =============================================================
                 # ROUTE B: Broad Net (Groq Gatekeeper & Fallback Ambiguity Rule)
@@ -722,6 +847,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                     # ---------------------------------------------------------
                     # 1 & 2: Groq is ONLINE
                     # ---------------------------------------------------------
+                    consecutive_fallback_errors = 0
                     if groq_res.get("is_match") is False:
                         # Groq rejects -> status = 'rejected', persist to Turso
                         log.info("Route B: Groq gatekeeper rejected '%s' @ %s. Saved Gemini quota.", job.title, job.company)
@@ -759,6 +885,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
 
                     if or_res and or_res.get("is_match") is True:
                         # Both accept -> Consensus met. status = 'active', send Discord alert
+                        consecutive_fallback_errors = 0
                         avg_score = int(((groq_res.get("ai_score") or 75) + (or_res.get("ai_score") or 75)) / 2)
                         log.info("Route B: Both models approved '%s' @ %s (Score: %d)", job.title, job.company, avg_score)
                         reason = groq_res.get("match_reason") or or_res.get("match_reason") or "Ensemble consensus approved"
@@ -799,6 +926,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
 
                     else:
                         # OpenRouter rejects -> Conflict met. status = 'deferred', persist for Gemini tie-breaker
+                        consecutive_fallback_errors = 0
                         log.info("Route B Split Decision for '%s' @ %s (Groq=True, OR=%s). Deferring to Gemini tie-breaker.",
                                  job.title, job.company, bool(or_res.get("is_match")) if or_res else None)
                         rec = {
@@ -837,6 +965,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
 
                     if or_res and or_res.get("is_match") is False:
                         # OpenRouter rejects -> status = 'rejected', persist to Turso
+                        consecutive_fallback_errors = 0
                         log.info("Route B Solo Gatekeeper: OpenRouter rejected '%s' @ %s.", job.title, job.company)
                         rec = {
                             "job_id": job_id,
@@ -862,6 +991,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                     elif or_res and or_res.get("is_match") is True:
                         # OpenRouter accepts -> DO NOT ALERT. Single junior model cannot approve broad roles.
                         # status = 'pending_groq_verification', persist to Turso
+                        consecutive_fallback_errors = 0
                         log.info(
                             "Route B Fallback Ambiguity: OpenRouter accepted '%s' @ %s. Parked as 'pending_groq_verification'.",
                             job.title, job.company,
@@ -890,7 +1020,9 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
 
                     else:
                         # Both models failed or error occurred -> Defer for Gemini executive tie-breaker
-                        log.warning("Route B: Both Groq and OpenRouter failed for '%s' @ %s. Deferring.", job.title, job.company)
+                        consecutive_fallback_errors += 1
+                        log.warning("Route B: Both Groq and OpenRouter failed for '%s' @ %s (Consecutive failures: %d). Deferring.",
+                                    job.title, job.company, consecutive_fallback_errors)
                         rec = {
                             "job_id": job_id,
                             "title": job.title,
@@ -912,6 +1044,17 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             await add_job(rec)
                         await metrics.inc_evaluated(is_high_match=False, alerted=False, is_deferred=True, is_broad=True)
 
+                        if consecutive_fallback_errors >= MAX_CONSECUTIVE_FALLBACK_ERRORS:
+                            log.error(
+                                "Circuit breaker tripped: %d consecutive fallback errors. AI providers exhausted (Groq TPD / OpenRouter). Aborting evaluation phase.",
+                                consecutive_fallback_errors,
+                            )
+                            print(f"[{_ts()}] [CIRCUIT BREAKER TRIPPED] {consecutive_fallback_errors} consecutive fallback errors. Bulk parking remaining jobs.")
+                            if not args.dry_run and eval_index < total_candidates:
+                                remaining_to_park = candidate_jobs[eval_index:]
+                                await bulk_park_jobs(remaining_to_park, reason="Consecutive fallback quota exhaustion", client=turso_client)
+                            break
+
         # ---------------------------------------------------------------------
         # Phase 3C: Dynamic Quota Sweeping
         # ---------------------------------------------------------------------
@@ -921,7 +1064,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
             log.info("Gemini quota remaining: %d. Sweeping deferred queue...", remaining_quota)
             print(f"\n[{_ts()}] >>> [Dynamic Quota Sweep] Gemini quota remaining: {remaining_quota}. Sweeping deferred queue...")
             try:
-                deferred_to_sweep = await get_deferred_jobs(limit=quota_to_fetch)
+                deferred_to_sweep = await get_deferred_jobs(limit=quota_to_fetch, client=turso_client)
                 if deferred_to_sweep:
                     log.info("Swept %d deferred job(s) from Turso queue for immediate Gemini evaluation.", len(deferred_to_sweep))
                     print(f"[{_ts()}] [Dynamic Quota Sweep] Swept {len(deferred_to_sweep)} deferred job(s) for Gemini evaluation.")
@@ -969,12 +1112,17 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                                     is_strict=True,
                                 )
                                 metrics.deferred_swept += 1
+                            else:
+                                log.warning("Deferred job '%s' could not be evaluated by Gemini. Incrementing retry count.", d_payload["title"])
+                                await increment_job_retry(d_id, client=turso_client)
                         except GeminiQuotaExceededError:
                             gemini_quota_exhausted = True
                             evaluator.GEMINI_QUOTA_EXHAUSTED = True
                             log.warning("Gemini quota exhausted during dynamic deferred sweep. Remaining jobs will wait for next run.")
+                            await increment_job_retry(d_id, client=turso_client)
                             break
                         except Exception as exc:
+                            await increment_job_retry(d_id, client=turso_client)
                             err_msg = str(exc)
                             if "429" in err_msg or "quota" in err_msg.lower() or "RESOURCE_EXHAUSTED" in err_msg:
                                 gemini_quota_exhausted = True
@@ -1004,6 +1152,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     print(f" * Pending Groq Swept       : {metrics.pending_groq_swept}")
     print(f" * Layer 0 Skipped (Seen)   : {metrics.seen_skipped}")
     print(f" * Layer 1 Discarded (Spam) : {metrics.spam_discarded}")
+    print(f" * Layer 1 Groq Coarse Filter: {metrics.coarse_discarded}")
     print(f" * Layer 4 Evaluated (AI)   : {metrics.evaluated}")
     print(f" * Strict Roles Evaluated   : {metrics.strict_evaluated}")
     print(f" * Broad Roles Gatekept     : {metrics.broad_gatekept}")
@@ -1026,6 +1175,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
             log.warning("Night shift garbage collection encountered an error: %s", gc_err)
 
     print("=" * 60 + "\n")
+    await _cleanup()
 
 
 

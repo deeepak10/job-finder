@@ -185,7 +185,7 @@ def get_genai_client() -> genai.Client:
 # Asynchronous Evaluator with Semaphore & Strict Timeout
 # --------------------------------------------------------------------------
 
-TARGET_GEMINI_MODEL = "gemini-3.6-flash"
+TARGET_GEMINI_MODEL = getattr(config, "GEMINI_MODEL", "gemini-1.5-flash")
 
 
 async def _call_gemini(
@@ -389,6 +389,7 @@ async def evaluate_job_with_model_rotation(
                 model=model_name,
                 response_format={"type": "json_object"},
                 temperature=0.1,
+                max_tokens=300,
             )
             return response
         except Exception as e:
@@ -600,6 +601,7 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
                 model=model_name,
                 response_format={"type": "json_object"},
                 temperature=0.1,
+                max_tokens=300,
             )
             if not response or not response.choices:
                 return None
@@ -717,3 +719,105 @@ async def evaluate_job_consensus(
         status=res_dict.get("status", "deferred"),
         job_category=res_dict.get("job_category", "General"),
     )
+
+
+async def batch_coarse_filter_groq(
+    jobs: list[Any],
+    groq_cli: Optional[AsyncOpenAI] = None,
+    model_name: str = "llama-3.1-8b-instant",
+) -> tuple[list[Any], list[Any]]:
+    """Execute a single bulk pre-filter call to Groq to prune obvious non-technical roles.
+
+    Aggregates fresh job titles and companies into a single JSON batch array, asking
+    Groq (llama-3.1-8b-instant) to return IDs of roles vaguely relevant to engineering
+    (Biomedical, Embedded, Software, Hardware, etc.). Discards administrative, nursing,
+    sales, and clerical roles before expensive deep evaluation.
+
+    Args:
+        jobs: List of candidate JobResult instances or dictionaries.
+        groq_cli: Optional AsyncOpenAI client instance.
+        model_name: Groq model name (default: llama-3.1-8b-instant).
+
+    Returns:
+        tuple (relevant_jobs, discarded_jobs). Fails open on error (returns all jobs as relevant).
+    """
+    if not jobs:
+        return [], []
+
+    g_client = groq_cli or groq_client
+    if not getattr(config, "GROQ_API_KEY", "") or getattr(config, "GROQ_API_KEY", "") == "mock-key":
+        log.info("GROQ_API_KEY not configured or mock; bypassing coarse batch pre-filter (fail-open).")
+        return list(jobs), []
+
+    # Process in chunks of up to 50 jobs to respect prompt token boundaries
+    chunk_size = 50
+    all_relevant: list[Any] = []
+    all_discarded: list[Any] = []
+
+    for chunk_start in range(0, len(jobs), chunk_size):
+        chunk = jobs[chunk_start : chunk_start + chunk_size]
+        items = []
+        for local_id, job in enumerate(chunk):
+            if isinstance(job, dict):
+                title = job.get("title", "")
+                company = job.get("company", "")
+            else:
+                title = getattr(job, "title", "")
+                company = getattr(job, "company", "")
+            items.append({"id": local_id, "title": title, "company": company})
+
+        system_instruction = (
+            "You are an expert technical recruiter filtering candidate job postings. "
+            "Your objective is a coarse, high-recall filter to identify roles vaguely relevant to engineering:\n"
+            "- Biomedical / Bioengineering / Medical Devices / HealthTech / Life Sciences Engineering\n"
+            "- Embedded Systems / Firmware / Hardware / Electrical / Electronics / FPGA / Robotics / IoT\n"
+            "- Software / Web / Full Stack / Backend / Python / Cloud / AI / ML / Systems Engineering\n\n"
+            "Discard obvious non-technical roles, including: Nurses, Clinical Coordinators, Medical Assistants, "
+            "Therapists, Doctors, Pharmacists, Sales Executives, Account Managers, Human Resources, Recruiters, "
+            "Executive Assistants, Office Administrators, Receptionists, Billing Specialists, Legal, Store Operations.\n\n"
+            "Output ONLY a valid JSON object with key 'relevant_ids' containing a list of integer IDs of the technical/engineering roles. "
+            'Example: {"relevant_ids": [0, 2, 4]}'
+        )
+
+        try:
+            response = await g_client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": f"Review these jobs and output relevant_ids:\n{json.dumps(items, indent=2)}"},
+                ],
+                model=model_name,
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=500,
+            )
+            if not response or not response.choices:
+                log.warning("Groq coarse batch filter returned empty response. Failing open for this chunk.")
+                all_relevant.extend(chunk)
+                continue
+
+            content = response.choices[0].message.content or ""
+            data = parse_ai_json(content)
+            if not isinstance(data, dict) or "relevant_ids" not in data or not isinstance(data["relevant_ids"], list):
+                log.warning("Groq coarse batch filter output malformed (%s). Failing open for this chunk.", content[:100])
+                all_relevant.extend(chunk)
+                continue
+
+            relevant_set = set(data["relevant_ids"])
+            chunk_relevant = [job for idx, job in enumerate(chunk) if idx in relevant_set]
+            chunk_discarded = [job for idx, job in enumerate(chunk) if idx not in relevant_set]
+
+            log.info(
+                "Groq coarse batch filter pruned chunk: %d -> %d relevant engineering roles (%d non-technical discarded).",
+                len(chunk),
+                len(chunk_relevant),
+                len(chunk_discarded),
+            )
+            all_relevant.extend(chunk_relevant)
+            all_discarded.extend(chunk_discarded)
+
+        except Exception as exc:
+            log.warning("Groq coarse batch filter encountered an error (%s). Failing open.", exc)
+            all_relevant.extend(chunk)
+
+    return all_relevant, all_discarded
+

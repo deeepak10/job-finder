@@ -212,3 +212,86 @@ def test_is_job_duplicate_and_desc_hash_query():
     assert dup is True
 
 
+def test_schema_includes_retry_count_and_desc_hash():
+    from database import SCHEMA, INDEXES
+    assert "retry_count" in SCHEMA
+    assert "desc_hash" in SCHEMA
+    assert any("idx_jobs_retries" in idx for idx in INDEXES)
+
+
+def test_async_database_writer_queue_processing():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from database import AsyncDatabaseWriter
+
+    mock_client = MagicMock()
+    mock_client.execute_query = AsyncMock(
+        return_value={
+            "results": [
+                {
+                    "type": "ok",
+                    "response": {"type": "execute", "result": {"affected_row_count": 1}},
+                }
+            ]
+        }
+    )
+
+    async def run_test():
+        writer = AsyncDatabaseWriter(mock_client)
+        writer.start()
+        try:
+            job_payload = {
+                "job_id": "test-job-writer-1",
+                "title": "Bio Engineer",
+                "company": "Medtronic",
+                "platform": "workday",
+                "url": "https://example.com/job",
+                "status": "active",
+            }
+            res = await writer.submit("add_job", job_payload)
+            assert res is True
+        finally:
+            await writer.stop()
+
+    asyncio.run(run_test())
+
+
+def test_bulk_park_jobs():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from database import bulk_park_jobs
+
+    mock_client = MagicMock()
+    mock_client.execute_query = AsyncMock(return_value={"results": []})
+    mock_client.session = None
+
+    jobs = [
+        {"title": "Job 1", "company": "Medtronic", "url": "https://m.com/1", "description": "Desc 1"},
+        {"title": "Job 2", "company": "Stryker", "url": "https://s.com/2", "description": "Desc 2"},
+    ]
+
+    count = asyncio.run(bulk_park_jobs(jobs, reason="Test fallback limit", client=mock_client))
+    assert count == 2
+    query, args = mock_client.execute_query.call_args[0]
+    assert "INSERT OR REPLACE INTO job_postings" in query
+    assert "parked" in args
+
+
+def test_increment_job_retry_discards_after_three_retries():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from database import increment_job_retry
+
+    mock_client = MagicMock()
+    mock_client.execute_query = AsyncMock(return_value={"results": []})
+    mock_client.session = None
+
+    res = asyncio.run(increment_job_retry("job-xyz-123", client=mock_client))
+    assert res is True
+    query, args = mock_client.execute_query.call_args[0]
+    assert "retry_count = retry_count + 1" in query
+    assert "CASE WHEN retry_count + 1 >= 3 THEN 'discarded'" in query
+    assert args == ["job-xyz-123"]
+
+
+
