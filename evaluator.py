@@ -211,9 +211,9 @@ async def _call_gemini(
     Raises:
         GeminiQuotaExceededError: If Google GenAI returns HTTP 429 RESOURCE_EXHAUSTED.
     """
-    # Safely pull from config, but gracefully catch empty strings injected by unit tests
-    actual_model = getattr(config, "GEMINI_MODEL", None) or TARGET_GEMINI_MODEL
-    model_name = actual_model
+    # Safely extract and fallback if the variable is None or an empty string ""
+    raw_model = getattr(config, "GEMINI_MODEL", None)
+    target_model = raw_model if raw_model else "gemini-3.6-flash"
 
     generation_config = types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -228,7 +228,7 @@ async def _call_gemini(
         for attempt in range(1, max_attempts + 1):
             try:
                 response = await client.aio.models.generate_content(
-                    model=model_name,
+                    model=target_model,
                     contents=content,
                     config=generation_config,
                 )
@@ -695,7 +695,7 @@ async def evaluate_with_consensus(
         return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Missing OPENROUTER_API_KEY", "status": "deferred", "job_category": "General"}
 
     groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
-    router_model = getattr(config, "OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+    router_model = getattr(config, "OPENROUTER_MODEL", "meta-llama/llama-3.2-3b-instruct:free")
 
     groq_task = query_model(g_client, groq_model, prompt)
     openrouter_task = query_model(r_client, router_model, prompt)
