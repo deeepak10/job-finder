@@ -700,7 +700,7 @@ async def purge_stale_parked_jobs(client: Optional[AsyncTursoConnection] = None)
 
 
 async def fix_workday_urls_in_db(client: Optional[AsyncTursoConnection] = None) -> int:
-    """Backfills and fixes existing Workday job records that have broken /en-US/External/ links."""
+    """Backfills and fixes existing Workday job records that have broken /External/ links."""
     from scrapers.workday import MEDTECH_WORKDAY_TENANTS
     close_client = False
     if client is None:
@@ -713,14 +713,27 @@ async def fix_workday_urls_in_db(client: Optional[AsyncTursoConnection] = None) 
             site_slug = tenant["url"].rstrip("/").split("/")[-1]
             if site_slug == "External":
                 continue
-            company_name = tenant["name"]
-            sql = """
+            from urllib.parse import urlsplit
+            netloc = urlsplit(tenant["url"]).netloc
+            sql_domain = f"%{netloc}%"
+
+            # Fix 1: Replace /External/ with real career site slug
+            sql1 = """
             UPDATE job_postings
-            SET url = replace(url, '/en-US/External/', '/en-US/' || ? || '/')
-            WHERE company = ? AND url LIKE '%/en-US/External/%'
+            SET url = replace(url, '/External/', '/' || ? || '/')
+            WHERE url LIKE ? AND url LIKE '%/External/%'
             """
-            await client.execute_query(sql, [site_slug, company_name])
+            await client.execute_query(sql1, [site_slug, sql_domain])
+
+            # Fix 2: Clean up any doubled /en-US/en-US/
+            sql2 = """
+            UPDATE job_postings
+            SET url = replace(url, '/en-US/en-US/', '/en-US/')
+            WHERE url LIKE ? AND url LIKE '%/en-US/en-US/%'
+            """
+            await client.execute_query(sql2, [sql_domain])
             fixed_count += 1
+
         log.info("Workday URL backfill completed across tenants.")
         return fixed_count
     except Exception as exc:
