@@ -40,19 +40,20 @@ DISCORD_WEBHOOK_SOFTWARE: str = os.getenv("DISCORD_WEBHOOK_SOFTWARE", "").strip(
 TURSO_DATABASE_URL: str = os.getenv("TURSO_DATABASE_URL", "").strip()
 TURSO_AUTH_TOKEN: str = os.getenv("TURSO_AUTH_TOKEN", "").strip()
 
-# Gemini LLM Evaluation — Production gemini-1.5-flash endpoint (1,500 RPD / 15 RPM)
+# Gemini LLM Evaluation — Production gemini-3.6-flash endpoint
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
 GEMINI_TIMEOUT_SECONDS: float = 45.0
 
-# Groq Fallback LLM Evaluation (Multi-Model Rotation: Llama-3.3-70B -> Llama-3.1-8B)
+# Groq Fallback LLM Evaluation
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama3-70b-8192").strip()
 GROQ_ENSEMBLE_MODEL: str = os.getenv("GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b").strip()
 
 # OpenRouter Ensemble Evaluation (Zero-Cost Free Tier)
+OR_MODEL: str = os.getenv("OR_MODEL", "meta-llama/llama-3.1-8b-instruct:free").strip()
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
-OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct:free").strip()
+OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", OR_MODEL).strip()
 
 # Priority Healthcare Companies (triggers Purple alert color: 986895)
 TARGET_HEALTHCARE_COMPANIES: list[str] = [

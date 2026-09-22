@@ -157,6 +157,15 @@ async def init_db(client: Optional[AsyncTursoConnection] = None) -> None:
         await client.execute_query(SCHEMA)
         for idx_sql in INDEXES:
             await client.execute_query(idx_sql)
+
+        # Add retry_count column for the dynamic quota sweep
+        try:
+            await client.execute_query("ALTER TABLE job_postings ADD COLUMN retry_count INTEGER DEFAULT 0;")
+            log.info("Added column 'retry_count' to job_postings.")
+        except Exception as e:
+            if "duplicate column name" not in str(e).lower() and "already exists" not in str(e).lower():
+                pass  # Ignore error if column already exists
+
         log.info("Turso database initialized successfully.")
     finally:
         if close_client and client.session:

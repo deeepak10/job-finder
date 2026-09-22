@@ -187,7 +187,7 @@ def get_genai_client() -> genai.Client:
 # Asynchronous Evaluator with Semaphore & Strict Timeout
 # --------------------------------------------------------------------------
 
-TARGET_GEMINI_MODEL = getattr(config, "GEMINI_MODEL", "gemini-1.5-flash")
+TARGET_GEMINI_MODEL = os.getenv("GEMINI_MODEL") or getattr(config, "GEMINI_MODEL", "gemini-3.6-flash")
 
 
 async def _call_gemini(
@@ -694,7 +694,7 @@ async def evaluate_with_consensus(
         return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Missing OPENROUTER_API_KEY", "status": "deferred", "job_category": "General"}
 
     groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
-    router_model = getattr(config, "OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct:free")
+    router_model = getattr(config, "OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
 
     groq_task = query_model(g_client, groq_model, prompt)
     openrouter_task = query_model(r_client, router_model, prompt)
