@@ -149,6 +149,11 @@ def parse_args() -> argparse.Namespace:
         help="Backfill and fix legacy broken Workday alert links in Turso.",
     )
     parser.add_argument(
+        "--reclassify",
+        action="store_true",
+        help="Analyze and re-route/reclassify General jobs in Turso DB to their true domain.",
+    )
+    parser.add_argument(
         "--check-config",
         action="store_true",
         help="Validate environment configuration and print status with masked credentials.",
@@ -396,7 +401,11 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
             if getattr(args, "purge_parked", False):
                 await purge_stale_parked_jobs(client=turso_client)
             if getattr(args, "fix_workday_urls", False):
+                from database import fix_workday_urls_in_db
                 await fix_workday_urls_in_db(client=turso_client)
+            if getattr(args, "reclassify", False):
+                from database import reclassify_jobs_in_db
+                await reclassify_jobs_in_db(client=turso_client)
         except Exception as exc:
             log.warning("Could not initialize pooled Turso client or DB writer: %s", exc)
 

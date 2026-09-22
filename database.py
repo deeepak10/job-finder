@@ -744,6 +744,41 @@ async def fix_workday_urls_in_db(client: Optional[AsyncTursoConnection] = None) 
             await client.session.close()
 
 
+async def reclassify_jobs_in_db(client: Optional[AsyncTursoConnection] = None) -> int:
+    """Backfills and classifies jobs in Turso DB that are currently marked as 'General'."""
+    from discord_alerts import classify_domain_fallback
+    close_client = False
+    if client is None:
+        client = get_turso_client()
+        close_client = True
+
+    updated_count = 0
+    try:
+        res = await client.execute_query(
+            "SELECT job_id, title, company FROM job_postings WHERE job_category = 'General'"
+        )
+        rows = parse_turso_rows(res)
+        for r in rows:
+            jid = r.get("job_id")
+            title = r.get("title", "")
+            company = r.get("company", "")
+            inferred = classify_domain_fallback(title, company)
+            if inferred != "General" and jid:
+                await client.execute_query(
+                    "UPDATE job_postings SET job_category = ? WHERE job_id = ?",
+                    [inferred, jid],
+                )
+                updated_count += 1
+        log.info("Reclassified %d jobs in Turso DB to their true domains.", updated_count)
+        return updated_count
+    except Exception as exc:
+        log.error("Failed to reclassify jobs in Turso: %s", exc)
+        return 0
+    finally:
+        if close_client and client.session:
+            await client.session.close()
+
+
 async def increment_job_retry(
     job_id: str,
     client: Optional[AsyncTursoConnection] = None,

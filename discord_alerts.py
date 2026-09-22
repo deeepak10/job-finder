@@ -50,6 +50,44 @@ def _safe_str(val: Any, max_len: int = 1000, fallback: str = "—") -> str:
     return s[:max_len].strip()
 
 
+BIOMED_ROUTING_KEYWORDS = [
+    "biomedical", "bio-medical", "bioengineering", "bioinformatics", "medical", "cardiac", "ablation", "ecg",
+    "arrhythmia", "telemetry", "patient monitor", "clinical", "hospital", "imaging", "mri",
+    "ultrasound", "dialysis", "ventilator", "endoscopy", "surgical", "healthcare", "medtech",
+    "healthtech", "physiological", "implantaire", "medtronic", "philips", "stryker", "gehc",
+    "ge healthcare", "gehealthcare", "getinge", "abbott", "baxter", "becton", "zimmer", "smith+nephew",
+    "skanray", "dozee", "qure", "agappe", "schiller", "bpl", "thermo fisher", "dhf", "biotech", "life science",
+]
+
+ECE_ROUTING_KEYWORDS = [
+    "embedded", "firmware", "hardware", "fpga", "verilog", "vhdl", "pcb", "microcontroller",
+    "microprocessor", "arm cortex", "arduino", "esp32", "stm32", "rtos", "yocto", "bsp",
+    "device driver", "electronics", "electrical", "circuit", "schematic", "iot", "sensor",
+    "analog", "vlsi", "semiconductor", "dsp", "signal processing", "asic", "cpu", "gpu", "microwave", "rf",
+]
+
+SOFTWARE_ROUTING_KEYWORDS = [
+    "python", "react", "next.js", "full stack", "fullstack", "frontend", "backend",
+    "web", "cloud", "aws", "azure", "fastapi", "django", "flask", "computer vision",
+    "opencv", "mediapipe", "ai", "ml", "machine learning", "software", "prompt engineer",
+]
+
+
+def classify_domain_fallback(title: str, company: str) -> str:
+    """Classifies a job into Biomedical_RD, ECE_Hardware, Software_Web, or General."""
+    text = f"{title} {company}".lower()
+    for kw in BIOMED_ROUTING_KEYWORDS:
+        if kw in text:
+            return "Biomedical_RD"
+    for kw in ECE_ROUTING_KEYWORDS:
+        if kw in text:
+            return "ECE_Hardware"
+    for kw in SOFTWARE_ROUTING_KEYWORDS:
+        if kw in text:
+            return "Software_Web"
+    return "General"
+
+
 def build_discord_embed(
     job: dict[str, Any],
     evaluation: Optional[Any] = None,
@@ -83,6 +121,10 @@ def build_discord_embed(
         raw_category = job.get("job_category")
 
     category = raw_category.strip() if isinstance(raw_category, str) and raw_category.strip() else "General"
+    if evaluation is None and category == "General":
+        inferred = classify_domain_fallback(job.get("title", ""), job.get("company", ""))
+        if inferred != "General":
+            category = inferred
 
     fields = [
         {"name": "🏢 Company", "value": company, "inline": True},
@@ -152,6 +194,10 @@ async def send_discord_alert_async(
         raw_category = job.get("job_category")
 
     category = raw_category.strip() if isinstance(raw_category, str) and raw_category.strip() else "General"
+    if evaluation is None and category == "General":
+        inferred = classify_domain_fallback(job.get("title", ""), job.get("company", ""))
+        if inferred != "General":
+            category = inferred
 
     # Map the AI's category to the specific webhook
     webhook_map = {
