@@ -187,7 +187,7 @@ def get_genai_client() -> genai.Client:
 # Asynchronous Evaluator with Semaphore & Strict Timeout
 # --------------------------------------------------------------------------
 
-TARGET_GEMINI_MODEL = os.getenv("GEMINI_MODEL") or getattr(config, "GEMINI_MODEL", "gemini-3.6-flash")
+TARGET_GEMINI_MODEL = "gemini-3.6-flash"
 
 
 async def _call_gemini(
@@ -211,8 +211,9 @@ async def _call_gemini(
     Raises:
         GeminiQuotaExceededError: If Google GenAI returns HTTP 429 RESOURCE_EXHAUSTED.
     """
-    # Target evaluation model dynamically resolved from environment
-    model_name = os.getenv("GEMINI_MODEL") or getattr(config, "GEMINI_MODEL", "gemini-3.6-flash")
+    # Safely pull from config, but gracefully catch empty strings injected by unit tests
+    actual_model = getattr(config, "GEMINI_MODEL", None) or TARGET_GEMINI_MODEL
+    model_name = actual_model
 
     generation_config = types.GenerateContentConfig(
         response_mime_type="application/json",
