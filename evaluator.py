@@ -211,9 +211,10 @@ async def _call_gemini(
     Raises:
         GeminiQuotaExceededError: If Google GenAI returns HTTP 429 RESOURCE_EXHAUSTED.
     """
-    # Safely extract and fallback if the variable is None or an empty string ""
+    # Safely extract and fallback
     raw_model = getattr(config, "GEMINI_MODEL", None)
-    target_model = raw_model if raw_model else "gemini-3.6-flash"
+    model_name = raw_model if raw_model else "gemini-3.6-flash"
+    target_model = model_name
 
     generation_config = types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -228,7 +229,7 @@ async def _call_gemini(
         for attempt in range(1, max_attempts + 1):
             try:
                 response = await client.aio.models.generate_content(
-                    model=target_model,
+                    model=model_name,
                     contents=content,
                     config=generation_config,
                 )

@@ -47,7 +47,7 @@ GEMINI_TIMEOUT_SECONDS: float = 45.0
 
 # Groq Fallback LLM Evaluation
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama3-8b-8192").strip()
 GROQ_ENSEMBLE_MODEL: str = os.getenv("GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b").strip()
 
 # OpenRouter Ensemble Evaluation (Zero-Cost Free Tier)
