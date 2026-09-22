@@ -601,7 +601,7 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
                 model=model_name,
                 response_format={"type": "json_object"},
                 temperature=0.1,
-                max_tokens=300,
+                max_tokens=1024,
             )
             if not response or not response.choices:
                 return None
@@ -724,19 +724,19 @@ async def evaluate_job_consensus(
 async def batch_coarse_filter_groq(
     jobs: list[Any],
     groq_cli: Optional[AsyncOpenAI] = None,
-    model_name: str = "llama-3.1-8b-instant",
+    model_name: Optional[str] = None,
 ) -> tuple[list[Any], list[Any]]:
     """Execute a single bulk pre-filter call to Groq to prune obvious non-technical roles.
 
     Aggregates fresh job titles and companies into a single JSON batch array, asking
-    Groq (llama-3.1-8b-instant) to return IDs of roles vaguely relevant to engineering
+    Groq to return IDs of roles vaguely relevant to engineering
     (Biomedical, Embedded, Software, Hardware, etc.). Discards administrative, nursing,
     sales, and clerical roles before expensive deep evaluation.
 
     Args:
         jobs: List of candidate JobResult instances or dictionaries.
         groq_cli: Optional AsyncOpenAI client instance.
-        model_name: Groq model name (default: llama-3.1-8b-instant).
+        model_name: Groq model name (default: config.GROQ_MODEL or openai/gpt-oss-120b).
 
     Returns:
         tuple (relevant_jobs, discarded_jobs). Fails open on error (returns all jobs as relevant).
@@ -748,6 +748,9 @@ async def batch_coarse_filter_groq(
     if not getattr(config, "GROQ_API_KEY", "") or getattr(config, "GROQ_API_KEY", "") == "mock-key":
         log.info("GROQ_API_KEY not configured or mock; bypassing coarse batch pre-filter (fail-open).")
         return list(jobs), []
+
+    if model_name is None:
+        model_name = getattr(config, "GROQ_MODEL", "openai/gpt-oss-120b")
 
     # Process in chunks of up to 50 jobs to respect prompt token boundaries
     chunk_size = 50
@@ -788,7 +791,7 @@ async def batch_coarse_filter_groq(
                 model=model_name,
                 response_format={"type": "json_object"},
                 temperature=0.0,
-                max_tokens=500,
+                max_tokens=1024,
             )
             if not response or not response.choices:
                 log.warning("Groq coarse batch filter returned empty response. Failing open for this chunk.")

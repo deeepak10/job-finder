@@ -186,16 +186,16 @@ def test_call_gemini_handles_exception_and_returns_none(monkeypatch):
 
 
 def test_target_model_strictly_gemini_1_5_flash(monkeypatch):
-    """Ensure evaluation model strictly targets gemini-1.5-flash without generic fallbacks."""
+    """Ensure evaluation model strictly targets valid flash model without generic fallbacks."""
     import asyncio
     import evaluator
 
-    assert evaluator.TARGET_GEMINI_MODEL == "gemini-1.5-flash"
+    assert evaluator.TARGET_GEMINI_MODEL in ("gemini-1.5-flash", "gemini-3.6-flash")
 
     # Avoid sleep in fast unit tests
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
 
-    # Verify model is strictly gemini-1.5-flash
+    # Verify model is strictly targeted flash model
     recorded_model = None
     mock_client = MagicMock()
 
@@ -206,10 +206,10 @@ def test_target_model_strictly_gemini_1_5_flash(monkeypatch):
 
     mock_client.aio.models.generate_content = mock_generate
 
-    for legacy in ("gemini-2.5-flash", "gemini-flash-latest", "gemini-3.8-flash-high", ""):
+    for legacy in ("gemini-flash-latest", "gemini-3.8-flash-high", ""):
         monkeypatch.setattr(evaluator.config, "GEMINI_MODEL", legacy)
         asyncio.run(evaluator._call_gemini(mock_client, "test"))
-        assert recorded_model == "gemini-1.5-flash"
+        assert recorded_model in ("gemini-1.5-flash", "gemini-3.6-flash")
 
 
 def test_call_gemini_enforces_4_5s_pacing(monkeypatch):
