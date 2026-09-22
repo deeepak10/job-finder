@@ -125,7 +125,7 @@ async def search_jobs(query_text: str, limit: int = 10) -> None:
 
 async def generate_outreach_email(
     job_id: str,
-    model_name: str = "llama-3.3-70b-versatile",
+    model_name: str = "llama-3.1-8b-instant",
 ) -> Optional[str]:
     """Retrieve job by ID from Turso and generate tailored cold email via Groq."""
     client = get_turso_client()
@@ -250,8 +250,8 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        default="llama-3.3-70b-versatile",
-        help="Groq model to use (default: llama-3.3-70b-versatile).",
+        default="llama-3.1-8b-instant",
+        help="Groq model to use (default: llama-3.1-8b-instant).",
     )
 
     args = parser.parse_args()
