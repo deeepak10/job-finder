@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from typing import Any, Optional
 
+import aiohttp
 from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
@@ -572,7 +574,50 @@ groq_client = AsyncOpenAI(
 openrouter_client = AsyncOpenAI(
     api_key=getattr(config, "OPENROUTER_API_KEY", "") or "mock-key",
     base_url="https://openrouter.ai/api/v1",
+    default_headers={
+        "HTTP-Referer": "https://github.com/deeepak10/job-finder",
+        "X-Title": "Autonomous AI Job Pipeline",
+    },
 )
+
+
+async def query_openrouter(messages: list) -> Optional[str]:
+    """
+    Executes a zero-cost consensus evaluation via OpenRouter's free tier.
+    """
+    openrouter_key = getattr(config, "OPENROUTER_API_KEY", "") or os.getenv("OPENROUTER_API_KEY", "")
+    headers = {
+        "Authorization": f"Bearer {openrouter_key}",
+        "Content-Type": "application/json",
+        # CRITICAL: Free tier requests require a valid Referer and X-Title to bypass abuse filters.
+        "HTTP-Referer": "https://github.com/deeepak10/job-finder",
+        "X-Title": "Autonomous AI Job Pipeline",
+    }
+
+    payload = {
+        # Utilize the free tier Llama 3 endpoint
+        "model": "meta-llama/llama-3-8b-instruct:free",
+        "messages": messages,
+        # Mandatory clamp to prevent the API from reserving credits for a 16k context window
+        "max_tokens": 300,  
+        "temperature": 0.1,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        # Enforce a hard 15-second timeout to protect GitHub Actions compute minutes
+        async with session.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as response:
+            if response.status == 429:
+                log.warning("OpenRouter Free Tier rate limit hit.")
+                return None
+
+            response.raise_for_status()
+            data = await response.json()
+            return data["choices"][0]["message"]["content"]
 
 
 # Reduce stop_after_attempt down to 3 and tune max wait time to 15s to fail gracefully rather than hanging
@@ -583,6 +628,9 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
     Features exponential backoff retry on HTTP 429 rate limit exceptions (up to 3 attempts)
     and resilient regex-based JSON extraction.
     """
+    is_openrouter = "openrouter" in str(getattr(client, "base_url", "")).lower() or ":free" in model_name
+    clamped_tokens = 300 if is_openrouter else 1024
+
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
@@ -601,7 +649,7 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
                 model=model_name,
                 response_format={"type": "json_object"},
                 temperature=0.1,
-                max_tokens=1024,
+                max_tokens=clamped_tokens,
             )
             if not response or not response.choices:
                 return None
@@ -646,7 +694,7 @@ async def evaluate_with_consensus(
         return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Missing OPENROUTER_API_KEY", "status": "deferred", "job_category": "General"}
 
     groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
-    router_model = getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat")
+    router_model = getattr(config, "OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct:free")
 
     groq_task = query_model(g_client, groq_model, prompt)
     openrouter_task = query_model(r_client, router_model, prompt)

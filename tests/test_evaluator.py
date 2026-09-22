@@ -676,6 +676,75 @@ def test_evaluate_job_with_model_rotation_circuit_breaker_and_pacing(monkeypatch
     assert call_count == 1  # Gemini was bypassed on second job
 
 
+def test_query_openrouter_zero_cost_payload_and_headers(monkeypatch):
+    """Verify query_openrouter uses free-tier model, clamped max_tokens, and WAF headers."""
+    import asyncio
+    import evaluator
+
+    monkeypatch.setattr(evaluator.config, "OPENROUTER_API_KEY", "test-or-key")
+
+    recorded_headers = None
+    recorded_json = None
+
+    class MockResponse:
+        status = 200
+        def raise_for_status(self):
+            pass
+        async def json(self):
+            return {"choices": [{"message": {"content": '{"is_match": true, "ai_score": 85}'}}]}
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    class MockSession:
+        def post(self, url, headers=None, json=None, timeout=None):
+            nonlocal recorded_headers, recorded_json
+            recorded_headers = headers
+            recorded_json = json
+            return MockResponse()
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    monkeypatch.setattr(evaluator.aiohttp, "ClientSession", MockSession)
+
+    res = asyncio.run(evaluator.query_openrouter([{"role": "user", "content": "hi"}]))
+    assert res == '{"is_match": true, "ai_score": 85}'
+    assert recorded_json["model"] == "meta-llama/llama-3-8b-instruct:free"
+    assert recorded_json["max_tokens"] == 300
+    assert recorded_headers["HTTP-Referer"] == "https://github.com/deeepak10/job-finder"
+    assert recorded_headers["X-Title"] == "Autonomous AI Job Pipeline"
+    assert recorded_headers["Authorization"] == "Bearer test-or-key"
+
+
+def test_query_openrouter_handles_429(monkeypatch):
+    """Verify query_openrouter returns None on HTTP 429 rate limit."""
+    import asyncio
+    import evaluator
+
+    class Mock429Response:
+        status = 429
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    class MockSession:
+        def post(self, url, headers=None, json=None, timeout=None):
+            return Mock429Response()
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    monkeypatch.setattr(evaluator.aiohttp, "ClientSession", MockSession)
+    res = asyncio.run(evaluator.query_openrouter([{"role": "user", "content": "hi"}]))
+    assert res is None
+
+
+
 
 
 

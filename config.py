@@ -50,9 +50,9 @@ GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 GROQ_ENSEMBLE_MODEL: str = os.getenv("GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b").strip()
 
-# OpenRouter Ensemble Evaluation (DeepSeek-Chat)
+# OpenRouter Ensemble Evaluation (Zero-Cost Free Tier)
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
-OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat").strip()
+OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct:free").strip()
 
 # Priority Healthcare Companies (triggers Purple alert color: 986895)
 TARGET_HEALTHCARE_COMPANIES: list[str] = [

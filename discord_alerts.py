@@ -52,7 +52,7 @@ def _safe_str(val: Any, max_len: int = 1000, fallback: str = "—") -> str:
 
 def build_discord_embed(
     job: dict[str, Any],
-    evaluation: Any,
+    evaluation: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Construct the Discord Rich Embed."""
     title = _safe_str(job.get("title"), max_len=240, fallback="Job Posting")
@@ -63,15 +63,15 @@ def build_discord_embed(
     color = pick_embed_color(company)
 
     match_reason = (
-        (evaluation.get("match_reason") if isinstance(evaluation, dict) else getattr(evaluation, "match_reason", ""))
+        ((evaluation.get("match_reason") if isinstance(evaluation, dict) else getattr(evaluation, "match_reason", "")) if evaluation else "")
         or job.get("match_reason")
         or "Passed semantic evaluation."
     )
 
     visa_sponsorship = (
-        evaluation.get("visa_sponsorship")
-        if isinstance(evaluation, dict)
-        else getattr(evaluation, "visa_sponsorship", "Not Specified")
+        (evaluation.get("visa_sponsorship") if isinstance(evaluation, dict) else getattr(evaluation, "visa_sponsorship", "Not Specified"))
+        if evaluation
+        else job.get("visa_sponsorship", "Not Specified")
     )
 
     raw_category = None
@@ -116,7 +116,7 @@ def build_discord_embed(
 
 async def send_discord_alert_async(
     job: dict[str, Any],
-    evaluation: Any,
+    evaluation: Optional[Any] = None,
     webhook_url: Optional[str] = None,
     session: Optional[aiohttp.ClientSession] = None,
 ) -> bool:
@@ -127,7 +127,9 @@ async def send_discord_alert_async(
     Enforces gating: Only dispatches if is_match is True.
     """
     is_match = False
-    if isinstance(evaluation, dict):
+    if evaluation is None:
+        is_match = bool(job.get("is_match", True))
+    elif isinstance(evaluation, dict):
         is_match = bool(evaluation.get("is_match", False))
     elif hasattr(evaluation, "is_match"):
         is_match = bool(getattr(evaluation, "is_match", False))

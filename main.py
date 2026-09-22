@@ -875,7 +875,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
 
                     # Groq accepts -> Query OpenRouter verification
                     log.info("Route B: Groq gatekeeper accepted '%s' @ %s. Verifying with OpenRouter...", job.title, job.company)
-                    or_model = getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat")
+                    or_model = getattr(config, "OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct:free")
                     or_res = None
                     try:
                         or_res = await query_model(openrouter_client, or_model, prompt)
@@ -955,7 +955,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                     # 3: Groq encounters API error -> Fallback Ambiguity Rule
                     # ---------------------------------------------------------
                     log.warning("Route B: Groq offline. Fallback to OpenRouter as solo gatekeeper for '%s' @ %s", job.title, job.company)
-                    or_model = getattr(config, "OPENROUTER_MODEL", "deepseek/deepseek-chat")
+                    or_model = getattr(config, "OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct:free")
                     or_res = None
                     try:
                         or_res = await query_model(openrouter_client, or_model, prompt)

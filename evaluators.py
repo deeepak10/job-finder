@@ -23,6 +23,7 @@ from evaluator import (
     openrouter_client,
     parse_ai_json,
     query_model,
+    query_openrouter,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "openrouter_client",
     "parse_ai_json",
     "query_model",
+    "query_openrouter",
 ]
