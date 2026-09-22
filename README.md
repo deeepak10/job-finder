@@ -89,7 +89,7 @@ flowchart TD
 ### 2. Multi-Provider LLM Waterfall & Ensemble Consensus (Gemini &rarr; Groq + OpenRouter)
 * **Primary Stage:** Evaluates candidates through Google Gemini (`gemini-3.6-flash`) with structured Pydantic schemas and 4.5-second pacing delay to exhaust the 20 free daily requests.
 * **Autonomous Failover:** Catches `429 RESOURCE_EXHAUSTED` and immediately triggers the dual-model ensemble tier.
-* **Strict Consensus Reconciliation:** Concurrently queries Groq (`openai/gpt-oss-120b`, cascading down to `llama-3.3-70b-versatile` / `llama-3.1-8b-instant` on 404) and OpenRouter (`deepseek/deepseek-chat`). A job is only accepted if **both models agree `is_match=True`**, eliminating false-positive notification noise.
+* **Strict Consensus Reconciliation:** Concurrently queries Groq (`openai/gpt-oss-120b`, cascading down to `llama-3.3-70b-versatile` / `llama-3.1-70b-versatile` on 404) and OpenRouter (`deepseek/deepseek-chat`). A job is only accepted if **both models agree `is_match=True`**, eliminating false-positive notification noise.
 
 ### 3. Deferred Re-Evaluation Queue (Turso Cloud SQLite)
 * If models conflict or quotas block evaluation entirely, raw postings are safely stored in Turso Cloud SQLite with `status = 'deferred'` and full text descriptions.
@@ -195,9 +195,9 @@ Edit `.env`:
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-3.6-flash
 
-# Fallback LLM: Groq Llama-3.1-8B
+# Fallback LLM: Groq Llama-3.1-70B
 GROQ_API_KEY=your_groq_api_key
-GROQ_MODEL=llama-3.1-8b-instant
+GROQ_MODEL=llama-3.1-70b-versatile
 
 # Cloud Database: Turso (LibSQL)
 TURSO_DATABASE_URL=libsql://your-database-name.turso.io

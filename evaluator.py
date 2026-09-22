@@ -316,7 +316,7 @@ def build_job_prompt(job_dict: dict[str, Any]) -> str:
 # Prioritized list of fallback models to attempt in order
 GROQ_FALLBACK_MODELS: list[str] = [
     "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
+    "llama-3.1-70b-versatile",
 ]
 
 
@@ -428,7 +428,7 @@ async def evaluate_job_groq(
 
     Serves as the secondary stage in the multi-provider waterfall, taking over when
     Gemini hits its 20 daily free requests limit. Attempts prioritized models
-    (llama-3.3-70b-versatile -> llama-3.1-8b-instant) and cascades upon 404 model_not_found.
+    (llama-3.3-70b-versatile -> llama-3.1-70b-versatile) and cascades upon 404 model_not_found.
     Strictly enforces a 6-second sleep to maintain throughput below Groq's 12,000 TPM limit.
 
     Args:
@@ -695,7 +695,7 @@ async def evaluate_with_consensus(
         return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Missing OPENROUTER_API_KEY", "status": "deferred", "job_category": "General"}
 
     groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
-    router_model = getattr(config, "OPENROUTER_MODEL", "meta-llama/llama-3.2-3b-instruct:free")
+    router_model = getattr(config, "OPENROUTER_MODEL", "google/gemma-2-9b-it:free")
 
     groq_task = query_model(g_client, groq_model, prompt)
     openrouter_task = query_model(r_client, router_model, prompt)

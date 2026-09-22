@@ -522,12 +522,12 @@ def test_evaluate_job_groq_rotates_on_404(monkeypatch):
     assert res.is_match is True
     assert res.visa_sponsorship == "Supported"
 
-    # Verify that create was called twice: first with 70b, then rotated to 8b
+    # Verify that create was called twice: first with 3.3 70b, then rotated to 3.1 70b
     assert mock_groq.chat.completions.create.call_count == 2
     first_call_model = mock_groq.chat.completions.create.call_args_list[0].kwargs["model"]
     second_call_model = mock_groq.chat.completions.create.call_args_list[1].kwargs["model"]
     assert first_call_model == "llama-3.3-70b-versatile"
-    assert second_call_model == "llama-3.1-8b-instant"
+    assert second_call_model == "llama-3.1-70b-versatile"
 
 
 def test_evaluate_job_groq_all_models_fail_404(monkeypatch):
@@ -542,7 +542,7 @@ def test_evaluate_job_groq_all_models_fail_404(monkeypatch):
     mock_groq.chat.completions.create = AsyncMock(
         side_effect=[
             Exception("Error 404: model_not_found for llama-3.3-70b-versatile"),
-            Exception("Error 404: model_not_found for llama-3.1-8b-instant"),
+            Exception("Error 404: model_not_found for llama-3.1-70b-versatile"),
         ]
     )
 

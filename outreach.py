@@ -125,7 +125,7 @@ async def search_jobs(query_text: str, limit: int = 10) -> None:
 
 async def generate_outreach_email(
     job_id: str,
-    model_name: str = "llama-3.1-8b-instant",
+    model_name: str = "llama-3.1-70b-versatile",
 ) -> Optional[str]:
     """Retrieve job by ID from Turso and generate tailored cold email via Groq."""
     client = get_turso_client()
@@ -184,14 +184,14 @@ Job Description:
         return None
     except Exception as exc:
         print(f"[!] Groq outreach generation failed with {model_name}: {exc}")
-        print("Retrying with fast fallback model (llama-3.1-8b-instant)...")
+        print("Retrying with fallback model (llama-3.1-70b-versatile)...")
         try:
             response = await groq_client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": OUTREACH_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                model="llama-3.1-8b-instant",
+                model="llama-3.1-70b-versatile",
                 temperature=0.4,
                 max_tokens=450,
             )
@@ -250,8 +250,8 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        default="llama-3.1-8b-instant",
-        help="Groq model to use (default: llama-3.1-8b-instant).",
+        default="llama-3.1-70b-versatile",
+        help="Groq model to use (default: llama-3.1-70b-versatile).",
     )
 
     args = parser.parse_args()
