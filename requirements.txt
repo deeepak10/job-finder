@@ -1,0 +1,26 @@
+# --- Core & Environment ---
+python-dotenv>=1.0.1
+pydantic>=2.10.0
+tenacity>=8.2.0
+
+# --- Cloud Database & AI Evaluation ---
+turso-python>=1.8
+google-genai>=2.0.0
+openai>=1.0.0
+
+# --- Scrapers (Native Async) ---
+playwright>=1.47.0            # Naukri (headless browser)
+playwright-stealth>=1.0.6     # Stealth evasions for headless Chromium
+apify-client>=1.7.1           # Wellfound via Apify actors
+requests>=2.32.3              # HTTP client fallback
+python-jobspy>=1.1.58         # LinkedIn guest scraper
+pandas>=2.0.0                 # Data processing for JobSpy
+
+# --- Parsing & Token Optimization ---
+beautifulsoup4>=4.12.3
+
+# --- Async & Concurrency ---
+aiohttp>=3.10.5
+
+# --- Development & Testing ---
+pytest>=8.3.3
