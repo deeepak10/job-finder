@@ -236,10 +236,12 @@ def test_database_deferred_jobs_helpers():
 
 def test_github_models_fallback_wiring():
     """Verify GitHub Models client points to Azure and gatekeeper uses 8B model."""
+    from openai import OpenAI, AsyncOpenAI
     import evaluators
     import evaluator
 
     # Fallback endpoint points to Azure
+    assert isinstance(evaluator.fallback_client, (OpenAI, AsyncOpenAI))
     assert "models.inference.ai.azure.com" in str(evaluator.fallback_client.base_url)
     assert evaluator.fallback_model == "Meta-Llama-3.1-8B-Instruct"
 

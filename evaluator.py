@@ -577,8 +577,8 @@ groq_client = AsyncOpenAI(
 )
 gatekeeper_client = groq_client
 
-# GitHub Models Client Initialization (Replaces OpenRouter via Azure Inference)
-fallback_client = AsyncOpenAI(
+# Initialize the GitHub Models fallback client via Azure Inference
+fallback_client = OpenAI(
     base_url="https://models.inference.ai.azure.com",
     api_key=os.getenv("GITHUB_MODELS_API_KEY") or getattr(config, "GITHUB_MODELS_API_KEY", "") or os.getenv("GH_MODELS_API_KEY") or getattr(config, "OPENROUTER_API_KEY", "") or "mock-key",
 )
