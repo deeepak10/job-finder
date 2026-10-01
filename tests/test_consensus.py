@@ -251,6 +251,10 @@ def test_github_models_fallback_wiring():
     # Evaluators module re-exports
     assert evaluators.fallback_model == "Meta-Llama-3.1-8B-Instruct"
     assert evaluators.gatekeeper_model == "llama-3.1-8b-instant"
+    assert evaluators.GITHUB_MODELS_MODEL == "Meta-Llama-3.1-8B-Instruct"
+    assert evaluators.GROQ_MODEL == "llama-3.1-8b-instant"
+    assert evaluator.GITHUB_MODELS_MODEL == "Meta-Llama-3.1-8B-Instruct"
+    assert evaluator.GROQ_MODEL == "llama-3.1-8b-instant"
     assert evaluators.fallback_client is evaluator.fallback_client
     assert evaluators.gatekeeper_client is evaluator.gatekeeper_client
 

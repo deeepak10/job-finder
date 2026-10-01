@@ -28,6 +28,8 @@ from evaluator import (
     parse_ai_json,
     query_model,
     query_openrouter,
+    GITHUB_MODELS_MODEL,
+    GROQ_MODEL,
 )
 
 __all__ = [
@@ -52,4 +54,6 @@ __all__ = [
     "parse_ai_json",
     "query_model",
     "query_openrouter",
+    "GITHUB_MODELS_MODEL",
+    "GROQ_MODEL",
 ]
