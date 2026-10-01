@@ -483,7 +483,7 @@ def test_evaluate_job_groq_success_and_pacing(monkeypatch):
 
 
 def test_evaluate_job_groq_rotates_on_404(monkeypatch):
-    """Ensure evaluate_job_groq catches 404 model_not_found on 70B and rotates to 8B."""
+    """Ensure evaluate_job_groq catches 404 model_not_found and rotates to next model."""
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
     from evaluator import evaluate_job_groq, JobEvaluation

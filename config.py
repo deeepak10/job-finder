@@ -47,15 +47,18 @@ GEMINI_TIMEOUT_SECONDS: float = 45.0
 
 # Groq Fallback LLM Evaluation
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "").strip()
+# Force Groq to the active 8B tier to prevent 404/400 errors
 GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant").strip()
-GROQ_ENSEMBLE_MODEL: str = os.getenv("GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b").strip()
+GROQ_ENSEMBLE_MODEL: str = os.getenv("GROQ_ENSEMBLE_MODEL", GROQ_MODEL).strip()
 
-# GitHub Models (Azure Inference) Fallback LLM Evaluation (Replacing OpenRouter)
-GITHUB_MODELS_API_KEY: str = os.getenv("GITHUB_MODELS_API_KEY", "").strip()
+# Replace OpenRouter with GitHub Models (Azure Inference)
+GITHUB_MODELS_API_KEY: str = (os.getenv("GITHUB_MODELS_API_KEY") or os.getenv("GH_MODELS_API_KEY") or "").strip()
 GITHUB_MODELS_MODEL: str = os.getenv("GITHUB_MODELS_MODEL", "Meta-Llama-3.1-8B-Instruct").strip()
+# Backward-compatibility aliases for OpenRouter
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", GITHUB_MODELS_API_KEY).strip()
 OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", GITHUB_MODELS_MODEL).strip()
 OR_MODEL: str = OPENROUTER_MODEL
+
 
 # Priority Healthcare Companies (triggers Purple alert color: 986895)
 TARGET_HEALTHCARE_COMPANIES: list[str] = [

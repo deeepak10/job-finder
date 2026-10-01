@@ -79,3 +79,26 @@ def test_batch_coarse_filter_bypasses_when_no_api_key(monkeypatch):
     relevant, discarded = asyncio.run(batch_coarse_filter_groq(jobs))
     assert len(relevant) == 1
     assert len(discarded) == 0
+
+
+def test_batch_coarse_filter_uses_gatekeeper_model(monkeypatch):
+    """Ensure filter calls Groq with the active llama-3.1-8b-instant gatekeeper model."""
+    from evaluator import gatekeeper_model
+
+    jobs = [
+        JobResult(title="Biomedical Engineer", company="Medtronic", url="https://m.com/1", platform="workday"),
+    ]
+    mock_client = MagicMock()
+    mock_choice = MagicMock()
+    mock_choice.message.content = json.dumps({"relevant_ids": [0]})
+    mock_client.chat.completions.create = AsyncMock(return_value=MagicMock(choices=[mock_choice]))
+
+    monkeypatch.setattr("config.GROQ_API_KEY", "test-key")
+
+    relevant, discarded = asyncio.run(batch_coarse_filter_groq(jobs, groq_cli=mock_client))
+    assert len(relevant) == 1
+
+    call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+    assert call_kwargs["model"] == gatekeeper_model
+    assert call_kwargs["model"] == "llama-3.1-8b-instant"
+

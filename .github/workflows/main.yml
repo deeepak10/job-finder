@@ -59,9 +59,9 @@ jobs:
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL || 'gemini-3.6-flash' }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: ${{ secrets.GROQ_MODEL || 'llama-3.1-8b-instant' }}
-          GITHUB_MODELS_API_KEY: ${{ secrets.GH_MODELS_API_KEY }}
-          GITHUB_MODELS_MODEL: ${{ secrets.GH_MODELS_MODEL || 'Meta-Llama-3.1-8B-Instruct' }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Map the new custom secret name to the script's variable
+          GITHUB_MODELS_API_KEY: ${{ secrets.GH_MODELS_API_KEY || secrets.GITHUB_MODELS_API_KEY }}
+          GITHUB_MODELS_MODEL: ${{ secrets.GH_MODELS_MODEL || secrets.GITHUB_MODELS_MODEL || 'Meta-Llama-3.1-8B-Instruct' }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_WEBHOOK_BIOMED: ${{ secrets.DISCORD_WEBHOOK_BIOMED }}
           DISCORD_WEBHOOK_ECE: ${{ secrets.DISCORD_WEBHOOK_ECE }}

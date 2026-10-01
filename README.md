@@ -3,7 +3,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Database: Turso](https://img.shields.io/badge/database-Turso%20(LibSQL)-00EB8D.svg?logo=sqlite&logoColor=black)](https://turso.tech/)
 [![Primary LLM: Gemini](https://img.shields.io/badge/primary%20LLM-Gemini%203.6%20Flash-4285F4.svg?logo=google&logoColor=white)](https://ai.google.dev/)
-[![Fallback LLM: Groq & OpenRouter](https://img.shields.io/badge/fallback%20LLM-Groq%20%2B%20OpenRouter%20Ensemble-F55036.svg?logo=meta&logoColor=white)](https://groq.com/)
+[![Fallback LLM: Groq & GitHub Models](https://img.shields.io/badge/fallback%20LLM-Groq%20%2B%20GitHub%20Models%20Ensemble-F55036.svg?logo=meta&logoColor=white)](https://groq.com/)
 [![Browser Automation](https://img.shields.io/badge/automation-Playwright%20Chromium-2EAD33.svg?logo=playwright&logoColor=white)](https://playwright.dev/)
 [![CI/CD: GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions%20(Hardened)-2088FF.svg?logo=github-actions&logoColor=white)](https://github.com/features/actions)
 [![Tests: Pytest](https://img.shields.io/badge/tests-123%20passed-brightgreen.svg?logo=pytest&logoColor=white)](https://pytest.org/)
@@ -11,7 +11,7 @@
 
 An enterprise-grade, asynchronous Python intelligence pipeline designed to autonomously scrape, deduplicate, filter, semantically evaluate, and deliver real-time alerts for **Biomedical R&D**, **Medical Device Firmware**, **HealthTech**, and **Embedded Systems** engineering opportunities across global epicenters and regional Indian engineering hubs.
 
-Engineered with a **resilient multi-provider LLM waterfall & ensemble consensus** (Google Gemini &rarr; Groq + OpenRouter), **deferred quota re-evaluation queue**, **zero-cost direct enterprise ATS ingestion** (Medtronic, Philips), **quota time-gating**, **serverless cloud persistence** (Turso Cloud LibSQL), and **async Discord notification dispatch**.
+Engineered with a **resilient multi-provider LLM waterfall & ensemble consensus** (Google Gemini &rarr; Groq + GitHub Models), **deferred quota re-evaluation queue**, **zero-cost direct enterprise ATS ingestion** (Medtronic, Philips), **quota time-gating**, **serverless cloud persistence** (Turso Cloud LibSQL), and **async Discord notification dispatch**.
 
 ---
 
@@ -45,7 +45,7 @@ flowchart TD
     subgraph EVAL["4. Dual-Provider LLM Waterfall & Consensus Ensemble"]
         GEMINI["Primary: Gemini 3.6 Flash<br/>(20 daily requests, 4.5s pacing)"]
         FALLBACK_CHECK{"429 Quota Exceeded?"}
-        ENSEMBLE["Secondary Tier: Consensus Fallback<br/>Groq (gpt-oss-120b) + OpenRouter (deepseek)"]
+        ENSEMBLE["Secondary Tier: Consensus Fallback<br/>Groq (llama-3.1-8b-instant) + GitHub Models (Meta-Llama-3.1-8B-Instruct)"]
         CONSENSUS_GATE{"Strict Consensus?<br/>(Both Agree is_match=True)"}
     end
 

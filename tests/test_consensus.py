@@ -48,6 +48,7 @@ def test_query_model_handles_exception():
 def test_evaluate_with_consensus_agreement(monkeypatch):
     """Ensure evaluate_with_consensus returns consensus_passed when both models match."""
     monkeypatch.setattr(config, "GROQ_API_KEY", "mock-groq-key")
+    monkeypatch.setattr(config, "GITHUB_MODELS_API_KEY", "mock-github-key")
     monkeypatch.setattr(config, "OPENROUTER_API_KEY", "mock-router-key")
 
     mock_groq = MagicMock()
@@ -73,6 +74,7 @@ def test_evaluate_with_consensus_agreement(monkeypatch):
 def test_evaluate_with_consensus_conflict(monkeypatch):
     """Ensure evaluate_with_consensus returns conflict when models disagree."""
     monkeypatch.setattr(config, "GROQ_API_KEY", "mock-groq-key")
+    monkeypatch.setattr(config, "GITHUB_MODELS_API_KEY", "mock-github-key")
     monkeypatch.setattr(config, "OPENROUTER_API_KEY", "mock-router-key")
 
     mock_groq = MagicMock()
@@ -95,6 +97,7 @@ def test_evaluate_with_consensus_conflict(monkeypatch):
 def test_evaluate_with_consensus_both_rejected(monkeypatch):
     """Ensure evaluate_with_consensus returns consensus_failed when both models reject."""
     monkeypatch.setattr(config, "GROQ_API_KEY", "mock-groq-key")
+    monkeypatch.setattr(config, "GITHUB_MODELS_API_KEY", "mock-github-key")
     monkeypatch.setattr(config, "OPENROUTER_API_KEY", "mock-router-key")
 
     mock_groq = MagicMock()
@@ -117,6 +120,7 @@ def test_evaluate_with_consensus_both_rejected(monkeypatch):
 def test_evaluate_with_consensus_failure(monkeypatch):
     """Ensure evaluate_with_consensus defers job when a model fails."""
     monkeypatch.setattr(config, "GROQ_API_KEY", "mock-groq-key")
+    monkeypatch.setattr(config, "GITHUB_MODELS_API_KEY", "mock-github-key")
     monkeypatch.setattr(config, "OPENROUTER_API_KEY", "mock-router-key")
 
     mock_groq = MagicMock()
@@ -136,6 +140,7 @@ def test_evaluate_with_consensus_failure(monkeypatch):
 def test_evaluate_with_consensus_missing_keys(monkeypatch):
     """Ensure evaluate_with_consensus defers cleanly when API keys are missing."""
     monkeypatch.setattr(config, "GROQ_API_KEY", "")
+    monkeypatch.setattr(config, "GITHUB_MODELS_API_KEY", "")
     monkeypatch.setattr(config, "OPENROUTER_API_KEY", "")
 
     result = asyncio.run(evaluate_with_consensus("Prompt"))
@@ -146,6 +151,7 @@ def test_evaluate_with_consensus_missing_keys(monkeypatch):
 def test_evaluate_job_consensus_wrapper(monkeypatch):
     """Ensure evaluate_job_consensus constructs a JobEvaluation with status."""
     monkeypatch.setattr(config, "GROQ_API_KEY", "mock-key")
+    monkeypatch.setattr(config, "GITHUB_MODELS_API_KEY", "mock-key")
     monkeypatch.setattr(config, "OPENROUTER_API_KEY", "mock-key")
 
     mock_groq = MagicMock()
@@ -226,3 +232,25 @@ def test_database_deferred_jobs_helpers():
         )
     )
     assert updated is True
+
+
+def test_github_models_fallback_wiring():
+    """Verify GitHub Models client points to Azure and gatekeeper uses 8B model."""
+    import evaluators
+    import evaluator
+
+    # Fallback endpoint points to Azure
+    assert "models.inference.ai.azure.com" in str(evaluator.fallback_client.base_url)
+    assert evaluator.fallback_model == "Meta-Llama-3.1-8B-Instruct"
+
+    # Gatekeeper model locked to active 8B endpoint
+    assert evaluator.gatekeeper_model == "llama-3.1-8b-instant"
+    assert config.GROQ_MODEL == "llama-3.1-8b-instant"
+    assert config.GITHUB_MODELS_MODEL == "Meta-Llama-3.1-8B-Instruct"
+
+    # Evaluators module re-exports
+    assert evaluators.fallback_model == "Meta-Llama-3.1-8B-Instruct"
+    assert evaluators.gatekeeper_model == "llama-3.1-8b-instant"
+    assert evaluators.fallback_client is evaluator.fallback_client
+    assert evaluators.gatekeeper_client is evaluator.gatekeeper_client
+

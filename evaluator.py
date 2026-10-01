@@ -21,7 +21,7 @@ from typing import Any, Optional
 import aiohttp
 from google import genai
 from google.genai import types
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAI
 from pydantic import BaseModel, ConfigDict, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -313,9 +313,12 @@ def build_job_prompt(job_dict: dict[str, Any]) -> str:
     )
 
 
+# Ensure Groq gatekeeper uses the correct model (Search and replace any decommissioned 70b models)
+gatekeeper_model = "llama-3.1-8b-instant"
+
 # Prioritized list of fallback models to attempt in order
 GROQ_FALLBACK_MODELS: list[str] = [
-    "llama-3.1-8b-instant",
+    gatekeeper_model,
     "llama-3.1-8b-instant",
 ]
 
@@ -338,7 +341,7 @@ async def evaluate_job_with_model_rotation(
     global GEMINI_QUOTA_EXHAUSTED
     if isinstance(job_or_prompt, dict):
         job = job_or_prompt
-        # 2-Second Client-Side Pacing: Protects Groq and OpenRouter from concurrent burst limit 429s
+        # 2-Second Client-Side Pacing: Protects Groq and GitHub Models from concurrent burst limit 429s
         await asyncio.sleep(2.0)
 
         # Hard Circuit Breaker Check
@@ -564,20 +567,27 @@ async def evaluate_jobs_batch(
 
 
 # --------------------------------------------------------------------------
-# Multi-Provider Consensus Fallback (Groq + GitHub Models)
+# Multi-Provider Consensus Fallback (Groq Gatekeeper + GitHub Models)
 # --------------------------------------------------------------------------
 
+# Groq Gatekeeper Client Initialization
 groq_client = AsyncOpenAI(
     api_key=getattr(config, "GROQ_API_KEY", "") or "mock-key",
     base_url="https://api.groq.com/openai/v1",
 )
+gatekeeper_client = groq_client
 
-# GitHub Models Client Initialization (Replacing OpenRouter)
+# GitHub Models Client Initialization (Replaces OpenRouter)
 fallback_client = AsyncOpenAI(
     base_url="https://models.inference.ai.azure.com",
     api_key=getattr(config, "GITHUB_MODELS_API_KEY", "") or getattr(config, "OPENROUTER_API_KEY", "") or "mock-key",
 )
+
+# Set the correct fallback model for the Azure endpoint
 fallback_model = "Meta-Llama-3.1-8B-Instruct"
+
+# Ensure Groq gatekeeper uses the correct model (Search and replace any decommissioned 70b models)
+gatekeeper_model = "llama-3.1-8b-instant"
 
 # Alias for backwards compatibility with tests and callers
 openrouter_client = fallback_client
@@ -636,7 +646,7 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
-            response = await client.chat.completions.create(
+            coro_or_resp = client.chat.completions.create(
                 messages=[
                     {
                         "role": "system",
@@ -653,6 +663,10 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
                 temperature=0.1,
                 max_tokens=clamped_tokens,
             )
+            if asyncio.iscoroutine(coro_or_resp) or hasattr(coro_or_resp, "__await__"):
+                response = await coro_or_resp
+            else:
+                response = coro_or_resp
             if not response or not response.choices:
                 return None
             content = response.choices[0].message.content or ""
@@ -675,7 +689,7 @@ async def evaluate_with_consensus(
     groq_cli: Optional[AsyncOpenAI] = None,
     router_cli: Optional[AsyncOpenAI] = None,
 ) -> dict[str, Any]:
-    """Queries Groq (openai/gpt-oss-120b) and OpenRouter concurrently, enforcing strict consensus.
+    """Queries Groq (llama-3.1-8b-instant) and GitHub Models concurrently, enforcing strict consensus.
 
     If models disagree or fail, defaults to deferred status for next-day batch processing.
     """
@@ -696,7 +710,7 @@ async def evaluate_with_consensus(
         log.warning("GITHUB_MODELS_API_KEY is not configured. Deferring job evaluation.")
         return {"is_match": False, "visa_sponsorship": "Unknown", "ai_score": 0, "match_reason": "Missing GITHUB_MODELS_API_KEY", "status": "deferred", "job_category": "General"}
 
-    groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
+    groq_model = getattr(config, "GROQ_MODEL", None) or getattr(config, "GROQ_ENSEMBLE_MODEL", None) or gatekeeper_model
     router_model = getattr(config, "GITHUB_MODELS_MODEL", None) or getattr(config, "OPENROUTER_MODEL", None) or fallback_model
 
     groq_task = query_model(g_client, groq_model, prompt)
@@ -801,7 +815,7 @@ async def batch_coarse_filter_groq(
         return list(jobs), []
 
     if model_name is None:
-        model_name = getattr(config, "GROQ_MODEL", "llama-3.1-8b-instant")
+        model_name = getattr(config, "GROQ_MODEL", None) or gatekeeper_model
 
     # Process in chunks of up to 50 jobs to respect prompt token boundaries
     chunk_size = 50

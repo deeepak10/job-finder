@@ -185,10 +185,10 @@ def print_config_check() -> None:
     print(f" * Gemini API Key      : {config.mask_secret(config.GEMINI_API_KEY, 6, 6)}")
     print(f" * Gemini Model        : {config.GEMINI_MODEL}")
     print(f" * Groq Fallback Models: llama-3.1-8b-instant -> llama-3.1-8b-instant")
-    print(f" * Groq Ensemble Model : {config.GROQ_ENSEMBLE_MODEL}")
+    print(f" * Groq Gatekeeper     : {getattr(config, 'GROQ_MODEL', 'llama-3.1-8b-instant')}")
     fallback_key = getattr(config, "GITHUB_MODELS_API_KEY", "") or getattr(config, "OPENROUTER_API_KEY", "")
-    fallback_model_name = getattr(config, "GITHUB_MODELS_MODEL", "") or getattr(config, "OPENROUTER_MODEL", "")
-    print(f" * Fallback API Key (GitHub/OR): {config.mask_secret(fallback_key, 8, 4)}")
+    fallback_model_name = getattr(config, "GITHUB_MODELS_MODEL", "") or getattr(config, "OPENROUTER_MODEL", "") or "Meta-Llama-3.1-8B-Instruct"
+    print(f" * Fallback API Key (GitHub Models): {config.mask_secret(fallback_key, 8, 4)}")
     print(f" * Fallback Model      : {fallback_model_name}")
     print(f" * Discord Default URL : {config.mask_secret(config.DISCORD_WEBHOOK_DEFAULT, 35, 6)}")
     print(f" * Discord Biomed URL  : {config.mask_secret(config.DISCORD_WEBHOOK_BIOMED, 35, 6)}")
@@ -559,7 +559,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
     # =========================================================================
     t_eval_start = time.perf_counter()
     # Smart Quota Slicing: Process max 6 candidate jobs per run only when fallbacks are not configured
-    if not getattr(config, "GROQ_API_KEY", None) and not getattr(config, "OPENROUTER_API_KEY", None):
+    if not getattr(config, "GROQ_API_KEY", None) and not getattr(config, "GITHUB_MODELS_API_KEY", None) and not getattr(config, "OPENROUTER_API_KEY", None):
         candidate_jobs = candidate_jobs[:6]
 
     print(f"\n[{_ts()}] >>> [Tri-Model Evaluation Phase] START | Evaluating {len(candidate_jobs)} fresh jobs, {len(pending_groq_to_sweep)} pending Groq")
@@ -577,7 +577,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
         # ---------------------------------------------------------------------
         if pending_groq_to_sweep:
             print(f"[{_ts()}] >>> [Groq Verification Sweep] Verifying {len(pending_groq_to_sweep)} broad role(s) with Groq")
-            groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
+            groq_model = getattr(config, "GROQ_MODEL", None) or getattr(config, "GROQ_ENSEMBLE_MODEL", "llama-3.1-8b-instant")
             for p_idx, p_job in enumerate(pending_groq_to_sweep, 1):
                 # Client-Side Pacing (Anti-Burst): guarantees we stay under provider rate limits
                 await asyncio.sleep(2.0)
@@ -596,7 +596,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                     groq_res = await query_model(groq_client, groq_model, p_prompt)
                     if groq_res is not None:
                         if groq_res.get("is_match") is True:
-                            # Consensus reached! Both OpenRouter and Groq accept.
+                            # Consensus reached! Both GitHub Models and Groq accept.
                             score = groq_res.get("ai_score") or 75
                             reason = groq_res.get("match_reason") or "Consensus confirmed by Groq"
                             category = groq_res.get("job_category") or p_job.get("job_category") or "General"
@@ -629,7 +629,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             metrics.pending_groq_verified += 1
                             log.info("Pending Groq Verification PASSED for '%s' @ %s. Alert dispatched.", p_payload["title"], p_payload["company"])
                         else:
-                            # Conflict reached: OpenRouter accepted previously, but Groq rejected.
+                            # Conflict reached: GitHub Models accepted previously, but Groq rejected.
                             # Park for next-day Gemini sweep
                             reason = groq_res.get("match_reason") or "Groq rejected upon verification"
                             await update_job_status(
@@ -659,7 +659,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
         for eval_index, job in enumerate(candidate_jobs, 1):
             if consecutive_fallback_errors >= MAX_CONSECUTIVE_FALLBACK_ERRORS:
                 log.error(
-                    "Circuit breaker tripped: %d consecutive fallback errors. AI providers exhausted (Groq TPD / OpenRouter). Aborting evaluation phase.",
+                    "Circuit breaker tripped: %d consecutive fallback errors. AI providers exhausted (Groq TPD / GitHub Models). Aborting evaluation phase.",
                     consecutive_fallback_errors,
                 )
                 print(f"[{_ts()}] [CIRCUIT BREAKER TRIPPED] {consecutive_fallback_errors} consecutive fallback errors. Bulk parking {total_candidates - eval_index + 1} remaining jobs.")
@@ -669,7 +669,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                 break
 
             # Client-Side Pacing (Anti-Burst)
-            # 2.0 seconds guarantees we never exceed 30 Requests Per Minute on Groq/OpenRouter
+            # 2.0 seconds guarantees we never exceed 30 Requests Per Minute on Groq/GitHub Models
             await asyncio.sleep(2.0)
 
             log.info(
@@ -841,7 +841,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                 )
                 groq_res = None
                 groq_online = False
-                groq_model = getattr(config, "GROQ_ENSEMBLE_MODEL", "openai/gpt-oss-120b")
+                groq_model = getattr(config, "GROQ_MODEL", None) or getattr(config, "GROQ_ENSEMBLE_MODEL", "llama-3.1-8b-instant")
                 try:
                     groq_res = await query_model(groq_client, groq_model, prompt)
                     if groq_res is not None:
@@ -881,14 +881,14 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                         await metrics.inc_evaluated(is_high_match=False, alerted=False, is_rejected=True, is_broad=True)
                         continue
 
-                    # Groq accepts -> Query OpenRouter verification
-                    log.info("Route B: Groq gatekeeper accepted '%s' @ %s. Verifying with OpenRouter...", job.title, job.company)
-                    or_model = getattr(config, "OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct:free")
+                    # Groq accepts -> Query GitHub Models verification
+                    log.info("Route B: Groq gatekeeper accepted '%s' @ %s. Verifying with GitHub Models...", job.title, job.company)
+                    fallback_model_name = getattr(config, "GITHUB_MODELS_MODEL", None) or getattr(config, "OPENROUTER_MODEL", None) or "Meta-Llama-3.1-8B-Instruct"
                     or_res = None
                     try:
-                        or_res = await query_model(openrouter_client, or_model, prompt)
+                        or_res = await query_model(openrouter_client, fallback_model_name, prompt)
                     except Exception as or_exc:
-                        log.warning("OpenRouter verification exception: %s", or_exc)
+                        log.warning("GitHub Models verification exception: %s", or_exc)
                         or_res = None
 
                     if or_res and or_res.get("is_match") is True:
@@ -933,9 +933,9 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                         await metrics.inc_evaluated(is_high_match=(avg_score >= 70), alerted=alert_delivered, is_broad=True)
 
                     else:
-                        # OpenRouter rejects -> Conflict met. status = 'deferred', persist for Gemini tie-breaker
+                        # GitHub Models rejects -> Conflict met. status = 'deferred', persist for Gemini tie-breaker
                         consecutive_fallback_errors = 0
-                        log.info("Route B Split Decision for '%s' @ %s (Groq=True, OR=%s). Deferring to Gemini tie-breaker.",
+                        log.info("Route B Split Decision for '%s' @ %s (Groq=True, Fallback=%s). Deferring to Gemini tie-breaker.",
                                  job.title, job.company, bool(or_res.get("is_match")) if or_res else None)
                         rec = {
                             "job_id": job_id,
@@ -951,7 +951,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "deferred",
                             "tier": "broad",
-                            "match_reason": "Split decision between Groq and OpenRouter",
+                            "match_reason": "Split decision between Groq and GitHub Models",
                             "job_category": groq_res.get("job_category") or "General",
                         }
                         if not args.dry_run:
@@ -962,19 +962,19 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                     # ---------------------------------------------------------
                     # 3: Groq encounters API error -> Fallback Ambiguity Rule
                     # ---------------------------------------------------------
-                    log.warning("Route B: Groq offline. Fallback to OpenRouter as solo gatekeeper for '%s' @ %s", job.title, job.company)
-                    or_model = getattr(config, "OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct:free")
+                    log.warning("Route B: Groq offline. Fallback to GitHub Models as solo gatekeeper for '%s' @ %s", job.title, job.company)
+                    fallback_model_name = getattr(config, "GITHUB_MODELS_MODEL", None) or getattr(config, "OPENROUTER_MODEL", None) or "Meta-Llama-3.1-8B-Instruct"
                     or_res = None
                     try:
-                        or_res = await query_model(openrouter_client, or_model, prompt)
+                        or_res = await query_model(openrouter_client, fallback_model_name, prompt)
                     except Exception as or_exc:
-                        log.error("Solo OpenRouter gatekeeper failed: %s", or_exc)
+                        log.error("Solo GitHub Models gatekeeper failed: %s", or_exc)
                         or_res = None
 
                     if or_res and or_res.get("is_match") is False:
-                        # OpenRouter rejects -> status = 'rejected', persist to Turso
+                        # GitHub Models rejects -> status = 'rejected', persist to Turso
                         consecutive_fallback_errors = 0
-                        log.info("Route B Solo Gatekeeper: OpenRouter rejected '%s' @ %s.", job.title, job.company)
+                        log.info("Route B Solo Gatekeeper: GitHub Models rejected '%s' @ %s.", job.title, job.company)
                         rec = {
                             "job_id": job_id,
                             "title": job.title,
@@ -989,7 +989,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                             "alert_sent": 0,
                             "status": "rejected",
                             "tier": "broad",
-                            "match_reason": or_res.get("match_reason") or "Solo OpenRouter rejected",
+                            "match_reason": or_res.get("match_reason") or "Solo GitHub Models rejected",
                             "job_category": or_res.get("job_category") or "General",
                         }
                         if not args.dry_run:
@@ -997,11 +997,11 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                         await metrics.inc_evaluated(is_high_match=False, alerted=False, is_rejected=True, is_broad=True)
 
                     elif or_res and or_res.get("is_match") is True:
-                        # OpenRouter accepts -> DO NOT ALERT. Single junior model cannot approve broad roles.
+                        # GitHub Models accepts -> DO NOT ALERT. Single junior model cannot approve broad roles.
                         # status = 'pending_groq_verification', persist to Turso
                         consecutive_fallback_errors = 0
                         log.info(
-                            "Route B Fallback Ambiguity: OpenRouter accepted '%s' @ %s. Parked as 'pending_groq_verification'.",
+                            "Route B Fallback Ambiguity: GitHub Models accepted '%s' @ %s. Parked as 'pending_groq_verification'.",
                             job.title, job.company,
                         )
                         rec = {
@@ -1029,7 +1029,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
                     else:
                         # Both models failed or error occurred -> Defer for Gemini executive tie-breaker
                         consecutive_fallback_errors += 1
-                        log.warning("Route B: Both Groq and OpenRouter failed for '%s' @ %s (Consecutive failures: %d). Deferring.",
+                        log.warning("Route B: Both Groq and GitHub Models failed for '%s' @ %s (Consecutive failures: %d). Deferring.",
                                     job.title, job.company, consecutive_fallback_errors)
                         rec = {
                             "job_id": job_id,
@@ -1054,7 +1054,7 @@ async def run_pipeline_async(args: argparse.Namespace) -> None:
 
                         if consecutive_fallback_errors >= MAX_CONSECUTIVE_FALLBACK_ERRORS:
                             log.error(
-                                "Circuit breaker tripped: %d consecutive fallback errors. AI providers exhausted (Groq TPD / OpenRouter). Aborting evaluation phase.",
+                                "Circuit breaker tripped: %d consecutive fallback errors. AI providers exhausted (Groq TPD / GitHub Models). Aborting evaluation phase.",
                                 consecutive_fallback_errors,
                             )
                             print(f"[{_ts()}] [CIRCUIT BREAKER TRIPPED] {consecutive_fallback_errors} consecutive fallback errors. Bulk parking remaining jobs.")

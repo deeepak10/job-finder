@@ -37,6 +37,7 @@ def test_get_query_tier_logic():
 def test_tri_model_consensus_reconciliation_states(monkeypatch):
     """Verify consensus reconciliation yields consensus_passed, consensus_failed, and conflict."""
     monkeypatch.setattr(config, "GROQ_API_KEY", "mock-groq")
+    monkeypatch.setattr(config, "GITHUB_MODELS_API_KEY", "mock-gh")
     monkeypatch.setattr(config, "OPENROUTER_API_KEY", "mock-or")
 
     # Case 1: Both Accept
