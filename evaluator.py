@@ -577,19 +577,23 @@ groq_client = AsyncOpenAI(
 )
 gatekeeper_client = groq_client
 
-# Initialize the GitHub Models fallback client via Azure Inference
+# ---------------------------------------------------------
+# FINAL ARCHITECTURE PATCH: GITHUB MODELS & GROQ
+# ---------------------------------------------------------
+
+# 1. Fix the Groq 404 Error (Use the permanently active 8B model)
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+gatekeeper_model = "llama-3.1-8b-instant"
+
+# 2. Fix the GitHub Models Connection Error (Route to Azure)
 fallback_client = OpenAI(
     base_url="https://models.inference.ai.azure.com",
-    api_key=os.getenv("GITHUB_MODELS_API_KEY") or getattr(config, "GITHUB_MODELS_API_KEY", "") or os.getenv("GH_MODELS_API_KEY") or getattr(config, "OPENROUTER_API_KEY", "") or "mock-key",
+    api_key=os.getenv("GITHUB_MODELS_API_KEY")
 )
 
-# Set the correct fallback model for the Azure endpoint
+# Lock in the correct fallback model string for the Azure endpoint
 fallback_model = "Meta-Llama-3.1-8B-Instruct"
 GITHUB_MODELS_MODEL = "Meta-Llama-3.1-8B-Instruct"
-
-# Ensure Groq gatekeeper uses the correct model (Search and replace any decommissioned 70b models)
-gatekeeper_model = "llama-3.1-8b-instant"
-GROQ_MODEL = "llama-3.1-8b-instant"
 
 # Alias for backwards compatibility with tests and callers
 openrouter_client = fallback_client
