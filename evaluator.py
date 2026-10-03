@@ -638,6 +638,9 @@ async def query_openrouter(messages: list) -> Optional[str]:
             return data["choices"][0]["message"]["content"]
 
 
+_AZURE_ENDPOINT_UNAVAILABLE: bool = False
+
+
 # Reduce stop_after_attempt down to 3 and tune max wait time to 15s to fail gracefully rather than hanging
 @retry(wait=wait_exponential(multiplier=1.5, min=2, max=15), stop=stop_after_attempt(3), reraise=False)
 async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Optional[dict[str, Any]]:
@@ -646,8 +649,13 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
     Features exponential backoff retry on HTTP 429 rate limit exceptions (up to 3 attempts)
     and resilient regex-based JSON extraction.
     """
+    global _AZURE_ENDPOINT_UNAVAILABLE
+    if _AZURE_ENDPOINT_UNAVAILABLE and "azure" in str(getattr(client, "base_url", "")).lower() and groq_client:
+        return await query_model(groq_client, "qwen/qwen3.8-27b", prompt)
+
     is_openrouter = "openrouter" in str(getattr(client, "base_url", "")).lower() or ":free" in model_name
-    clamped_tokens = 300 if is_openrouter else 1024
+    is_groq = "groq" in str(getattr(client, "base_url", "")).lower() or "qwen" in model_name.lower()
+    clamped_tokens = 300 if (is_openrouter or is_groq) else 1024
 
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
@@ -696,6 +704,7 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
             # Fallback for retired Azure GitHub Models endpoint (connection / getaddrinfo error)
             is_conn_error = "connection" in exc_str.lower() or "getaddrinfo" in exc_str.lower()
             if is_conn_error and "azure" in str(getattr(client, "base_url", "")).lower() and groq_client:
+                _AZURE_ENDPOINT_UNAVAILABLE = True
                 log.warning("GitHub Models Azure endpoint connection error. Falling back to Groq model 'qwen/qwen3.8-27b'...")
                 return await query_model(groq_client, "qwen/qwen3.8-27b", prompt)
 
@@ -732,13 +741,9 @@ async def evaluate_with_consensus(
     groq_model = getattr(config, "GROQ_MODEL", None) or getattr(config, "GROQ_ENSEMBLE_MODEL", None) or gatekeeper_model
     router_model = getattr(config, "GITHUB_MODELS_MODEL", None) or getattr(config, "OPENROUTER_MODEL", None) or fallback_model
 
-    groq_task = query_model(g_client, groq_model, prompt)
-    openrouter_task = query_model(r_client, router_model, prompt)
-
-    results = await asyncio.gather(groq_task, openrouter_task, return_exceptions=True)
-
-    groq_res = results[0] if isinstance(results[0], dict) else None
-    openrouter_res = results[1] if isinstance(results[1], dict) else None
+    groq_res = await query_model(g_client, groq_model, prompt)
+    await asyncio.sleep(0.5)
+    openrouter_res = await query_model(r_client, router_model, prompt)
 
     # If both models failed to respond correctly
     if not groq_res or not openrouter_res:
@@ -867,16 +872,34 @@ async def batch_coarse_filter_groq(
         )
 
         try:
-            response = await g_client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": f"Review these jobs and output relevant_ids:\n{json.dumps(items, indent=2)}"},
-                ],
-                model=model_name,
-                response_format={"type": "json_object"},
-                temperature=0.0,
-                max_tokens=1024,
-            )
+            try:
+                response = await g_client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": f"Review these jobs and output relevant_ids:\n{json.dumps(items, indent=2)}"},
+                    ],
+                    model=model_name,
+                    response_format={"type": "json_object"},
+                    temperature=0.0,
+                    max_tokens=500,
+                )
+            except Exception as initial_err:
+                err_str = str(initial_err)
+                code = getattr(initial_err, "status_code", getattr(initial_err, "code", None))
+                if (code == 404 or "404" in err_str or "model_not_found" in err_str.lower()) and model_name != "qwen/qwen3.8-27b":
+                    log.warning("Groq coarse batch filter model '%s' returned 404. Retrying with 'qwen/qwen3.8-27b'...", model_name)
+                    response = await g_client.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": system_instruction},
+                            {"role": "user", "content": f"Review these jobs and output relevant_ids:\n{json.dumps(items, indent=2)}"},
+                        ],
+                        model="qwen/qwen3.8-27b",
+                        response_format={"type": "json_object"},
+                        temperature=0.0,
+                        max_tokens=500,
+                    )
+                else:
+                    raise initial_err
             if not response or not response.choices:
                 log.warning("Groq coarse batch filter returned empty response. Failing open for this chunk.")
                 all_relevant.extend(chunk)
