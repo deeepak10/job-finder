@@ -48,7 +48,8 @@ GEMINI_TIMEOUT_SECONDS: float = 45.0
 # Groq Fallback LLM Evaluation
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "").strip()
 # Force Groq to the active 8B tier to prevent 404/400 errors
-GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant").strip()
+_raw_groq = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant").strip()
+GROQ_MODEL: str = "llama-3.1-8b-instant" if (not _raw_groq or "70b" in _raw_groq.lower() or "8192" in _raw_groq) else _raw_groq
 GROQ_ENSEMBLE_MODEL: str = os.getenv("GROQ_ENSEMBLE_MODEL", GROQ_MODEL).strip()
 
 # Replace OpenRouter with GitHub Models (Azure Inference)

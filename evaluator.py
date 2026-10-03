@@ -582,13 +582,13 @@ gatekeeper_client = groq_client
 # ---------------------------------------------------------
 
 # 1. Fix the Groq 404 Error (Use the permanently active 8B model)
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MODEL = "llama-3.1-8b-instant"
 gatekeeper_model = "llama-3.1-8b-instant"
 
 # 2. Fix the GitHub Models Connection Error (Route to Azure)
 fallback_client = OpenAI(
     base_url="https://models.inference.ai.azure.com",
-    api_key=os.getenv("GITHUB_MODELS_API_KEY")
+    api_key=os.getenv("GITHUB_MODELS_API_KEY") or os.getenv("GH_MODELS_API_KEY") or getattr(config, "GITHUB_MODELS_API_KEY", "") or "mock-key",
 )
 
 # Lock in the correct fallback model string for the Azure endpoint
@@ -686,6 +686,19 @@ async def query_model(client: AsyncOpenAI, model_name: str, prompt: str) -> Opti
                 log.warning("Rate limit (429) hit on %s. Retrying in %.2fs (attempt %d/%d)...", model_name, backoff, attempt, max_attempts)
                 await asyncio.sleep(backoff)
                 continue
+
+            # Fallback for decommissioned Groq models (404 model_not_found)
+            is_not_found = code == 404 or "404" in exc_str or "model_not_found" in exc_str.lower()
+            if is_not_found and "groq" in str(getattr(client, "base_url", "")).lower() and model_name != "qwen/qwen3.8-27b":
+                log.warning("Groq model '%s' returned 404/not found. Retrying with active model 'qwen/qwen3.8-27b'...", model_name)
+                return await query_model(client, "qwen/qwen3.8-27b", prompt)
+
+            # Fallback for retired Azure GitHub Models endpoint (connection / getaddrinfo error)
+            is_conn_error = "connection" in exc_str.lower() or "getaddrinfo" in exc_str.lower()
+            if is_conn_error and "azure" in str(getattr(client, "base_url", "")).lower() and groq_client:
+                log.warning("GitHub Models Azure endpoint connection error. Falling back to Groq model 'qwen/qwen3.8-27b'...")
+                return await query_model(groq_client, "qwen/qwen3.8-27b", prompt)
+
             log.error("Error querying model %s: %s", model_name, e)
             return None
 

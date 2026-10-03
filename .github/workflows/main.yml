@@ -58,7 +58,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL || 'gemini-3.6-flash' }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GROQ_MODEL: ${{ secrets.GROQ_MODEL || 'llama-3.1-8b-instant' }}
+          GROQ_MODEL: 'llama-3.1-8b-instant'
           # Map the new custom secret name to the script's variable
           GITHUB_MODELS_API_KEY: ${{ secrets.GH_MODELS_API_KEY || secrets.GITHUB_MODELS_API_KEY }}
           GITHUB_MODELS_MODEL: ${{ secrets.GH_MODELS_MODEL || secrets.GITHUB_MODELS_MODEL || 'Meta-Llama-3.1-8B-Instruct' }}
