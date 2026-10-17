@@ -27,6 +27,7 @@ from evaluator import JobEvaluation
 log = logging.getLogger(__name__)
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+DISCORD_ALERT_MENTION = os.getenv("DISCORD_ALERT_MENTION", "@everyone").strip()
 
 # Decimal color codes specified in Master Spec v2
 COLOR_PURPLE = 986895   # Target healthcare companies
@@ -161,12 +162,14 @@ async def send_discord_alert_async(
     evaluation: Optional[Any] = None,
     webhook_url: Optional[str] = None,
     session: Optional[aiohttp.ClientSession] = None,
+    mention: Optional[str] = None,
 ) -> bool:
     """Send alert to Discord webhook asynchronously with multi-channel routing.
 
     Extracts job_category from AI evaluation and dynamically maps it to
     channel-specific webhooks (Biomedical, ECE, Software, or General).
     Enforces gating: Only dispatches if is_match is True.
+    Includes mention (default: @everyone) to trigger unread notification bubbles.
     """
     is_match = False
     if evaluation is None:
@@ -231,7 +234,17 @@ async def send_discord_alert_async(
         return False
 
     embed = build_discord_embed(job, evaluation)
-    payload = {"embeds": [embed]}
+    payload: dict[str, Any] = {"embeds": [embed]}
+
+    # Mention tag in message content to trigger Discord red bubble notification icons
+    active_mention = (
+        mention
+        if mention is not None
+        else getattr(config, "DISCORD_ALERT_MENTION", DISCORD_ALERT_MENTION)
+    )
+    if active_mention:
+        payload["content"] = active_mention
+        payload["allowed_mentions"] = {"parse": ["everyone", "roles", "users"]}
 
     # Anti-burst rate limit protection: 1.5 second sleep guarantees staying well below Discord limits
     await asyncio.sleep(1.5)
@@ -270,6 +283,7 @@ def send_discord_alert(
     job: dict[str, Any],
     evaluation: Optional[JobEvaluation] = None,
     webhook_url: Optional[str] = None,
+    mention: Optional[str] = None,
 ) -> bool:
     """Synchronous helper wrapper around send_discord_alert_async."""
     if evaluation is None:
@@ -278,13 +292,14 @@ def send_discord_alert(
             is_match=True,
             visa_sponsorship="Work authorization supported",
         )
-    return asyncio.run(send_discord_alert_async(job, evaluation, webhook_url))
+    return asyncio.run(send_discord_alert_async(job, evaluation, webhook_url, mention=mention))
 
 
 async def send_system_alert_async(
     message: str,
     webhook_url: Optional[str] = None,
     session: Optional[aiohttp.ClientSession] = None,
+    mention: Optional[str] = None,
 ) -> bool:
     """Fires a red-colored embed to Discord if the pipeline experiences a critical anomaly."""
     target_url = webhook_url or config.DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URL
@@ -304,7 +319,10 @@ async def send_system_alert_async(
         "color": 16711680,  # Red
         "footer": {"text": "Job Finder System Monitor"},
     }
-    payload = {"embeds": [embed]}
+    payload: dict[str, Any] = {"embeds": [embed]}
+    if mention:
+        payload["content"] = mention
+        payload["allowed_mentions"] = {"parse": ["everyone", "roles", "users"]}
 
     close_session = False
     if session is None:
@@ -331,9 +349,10 @@ async def send_system_alert_async(
 def send_system_alert(
     message: str,
     webhook_url: Optional[str] = None,
+    mention: Optional[str] = None,
 ) -> bool:
     """Synchronous helper wrapper around send_system_alert_async."""
-    return asyncio.run(send_system_alert_async(message, webhook_url))
+    return asyncio.run(send_system_alert_async(message, webhook_url, mention=mention))
 
 
 if __name__ == "__main__":

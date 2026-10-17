@@ -36,6 +36,9 @@ DISCORD_WEBHOOK_BIOMED: str = os.getenv("DISCORD_WEBHOOK_BIOMED", "").strip()
 DISCORD_WEBHOOK_ECE: str = os.getenv("DISCORD_WEBHOOK_ECE", "").strip()
 DISCORD_WEBHOOK_SOFTWARE: str = os.getenv("DISCORD_WEBHOOK_SOFTWARE", "").strip()
 
+# Discord Mention Tag for Alerts (defaults to @everyone to trigger red notification badge)
+DISCORD_ALERT_MENTION: str = os.getenv("DISCORD_ALERT_MENTION", "@everyone").strip()
+
 # Turso Cloud Database
 TURSO_DATABASE_URL: str = os.getenv("TURSO_DATABASE_URL", "").strip()
 TURSO_AUTH_TOKEN: str = os.getenv("TURSO_AUTH_TOKEN", "").strip()
@@ -96,6 +99,7 @@ def validate_configuration() -> dict[str, Any]:
         "discord_biomed_configured": bool(DISCORD_WEBHOOK_BIOMED),
         "discord_ece_configured": bool(DISCORD_WEBHOOK_ECE),
         "discord_software_configured": bool(DISCORD_WEBHOOK_SOFTWARE),
+        "discord_mention": DISCORD_ALERT_MENTION,
         "serpapi_configured": bool(SERPAPI_API_KEY),
         "apify_configured": bool(APIFY_TOKEN),
         "groq_configured": bool(GROQ_API_KEY),

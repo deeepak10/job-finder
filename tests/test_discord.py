@@ -196,4 +196,73 @@ def test_multi_channel_discord_routing_safe_type_handling(sample_job, monkeypatc
         assert mock_post.call_args[0][0] == "https://discord.com/api/webhooks/default/111"
 
 
+def test_alert_includes_everyone_mention_by_default(sample_job, sample_evaluation):
+    import asyncio
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 204
+        sent = asyncio.run(send_discord_alert_async(sample_job, sample_evaluation, webhook_url="https://discord.com/api/webhooks/123/abc"))
+        assert sent is True
+        mock_post.assert_called_once()
+        payload = mock_post.call_args[1]["json"]
+        assert payload.get("content") == "@everyone"
+        assert payload.get("allowed_mentions") == {"parse": ["everyone", "roles", "users"]}
+        assert len(payload.get("embeds", [])) == 1
+
+
+def test_alert_custom_mention_param(sample_job, sample_evaluation):
+    import asyncio
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 204
+        sent = asyncio.run(
+            send_discord_alert_async(
+                sample_job,
+                sample_evaluation,
+                webhook_url="https://discord.com/api/webhooks/123/abc",
+                mention="<@&987654321>",
+            )
+        )
+        assert sent is True
+        payload = mock_post.call_args[1]["json"]
+        assert payload.get("content") == "<@&987654321>"
+        assert payload.get("allowed_mentions") == {"parse": ["everyone", "roles", "users"]}
+
+
+def test_alert_custom_mention_config(sample_job, sample_evaluation, monkeypatch):
+    import asyncio
+    import config
+    monkeypatch.setattr(config, "DISCORD_ALERT_MENTION", "@here")
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 204
+        sent = asyncio.run(
+            send_discord_alert_async(
+                sample_job,
+                sample_evaluation,
+                webhook_url="https://discord.com/api/webhooks/123/abc",
+            )
+        )
+        assert sent is True
+        payload = mock_post.call_args[1]["json"]
+        assert payload.get("content") == "@here"
+
+
+def test_alert_disable_mention(sample_job, sample_evaluation, monkeypatch):
+    import asyncio
+    import config
+    monkeypatch.setattr(config, "DISCORD_ALERT_MENTION", "")
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_post.return_value.__aenter__.return_value.status = 204
+        sent = asyncio.run(
+            send_discord_alert_async(
+                sample_job,
+                sample_evaluation,
+                webhook_url="https://discord.com/api/webhooks/123/abc",
+            )
+        )
+        assert sent is True
+        payload = mock_post.call_args[1]["json"]
+        assert "content" not in payload
+        assert "allowed_mentions" not in payload
+
+
+
 
